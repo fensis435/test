@@ -39,7 +39,7 @@ export default function Home() {
       <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}>
         <Toolbar>
           <Typography variant="h6" noWrap component="div">
-            企業ネットワークグラフ
+            ネットワークグラフ
           </Typography>
         </Toolbar>
       </AppBar>
