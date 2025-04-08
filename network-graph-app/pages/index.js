@@ -8,6 +8,7 @@ import Toolbar from '@mui/material/Toolbar';
 import Typography from '@mui/material/Typography';
 import Drawer from '@mui/material/Drawer';
 import { IconButton, List, ListItem, ListItemText } from "@mui/material";
+import MenuIcon from "@mui/icons-material/Menu";
 const NetworkGraph = dynamic(() => import('../components/Graph/NetworkGraph'), {
     ssr: false,
 });
@@ -19,6 +20,10 @@ export default function Home() {
   const [selectedItem, setSelectedItem] = useState(null);
   const [editMode, setEditMode] = useState(false);
   const [isDrawerOpen, setDrawerOpen] = useState(false);
+
+  const toggleDrawer = () => {
+    setDrawerOpen((prevState) => !prevState);
+  };
 
   const handleNodeSelect = useCallback((node) => {
     setSelectedItem({ type: 'node', data: node });
@@ -35,6 +40,14 @@ export default function Home() {
     setSelectedItem(null);
   }, []);
 
+  const handleMouseEnter = () => {
+    setDrawerOpen(true);
+  };
+
+  const handleMouseLeave = () => {
+    setDrawerOpen(false);
+  };
+
   return (
     <Box sx={{ display: 'flex' }}>
       <CssBaseline />
@@ -44,7 +57,7 @@ export default function Home() {
            edge="start"
            color="inherit"
            aria-label="menu"
-           onClick={toggleDrawer(true)}
+           onClick={toggleDrawer}
           >
            <MenuIcon />
           </IconButton>
@@ -53,11 +66,23 @@ export default function Home() {
           </Typography>
         </Toolbar>
       </AppBar>
+      <div
+        style={{
+          width: "10px",
+          height: "100vh",
+          position: "fixed",
+          left: 0,
+          top: 0,
+          backgroundColor: "transparent",
+          cursor: "pointer",
+        }}
+        onMouseEnter={handleMouseEnter}
+      />
       <Drawer
         anchor="left"
         open={isDrawerOpen}
-        onClose={toggleDrawer(false)}>
-        variant="permanent"
+        onClose={toggleDrawer}
+        variant="temporary"
         sx={{
           width: DRAWER_WIDTH,
           flexShrink: 0,

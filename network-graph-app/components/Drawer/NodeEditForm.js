@@ -274,10 +274,9 @@ export default function NodeEditForm({ node, onSave }) {
           </Box>
         </Grid>
 
-        <Grid item xs={12} sx={{ mt: 2 }}>
-          <Button variant="contained" color="primary" type="submit" fullWidth>
-            保存
-          </Button>
+        <Grid sx={{ display: "flex", gap: 2 }}>
+          <Button variant="contained" color="primary" type="submit" fullWidth>保存</Button>
+          <Button variant="contained" color="primary" type="submit" fullWidth>戻る</Button>
         </Grid>
       </Grid>
     </Box>
