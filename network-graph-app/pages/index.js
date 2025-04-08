@@ -7,6 +7,7 @@ import AppBar from '@mui/material/AppBar';
 import Toolbar from '@mui/material/Toolbar';
 import Typography from '@mui/material/Typography';
 import Drawer from '@mui/material/Drawer';
+import { IconButton, List, ListItem, ListItemText } from "@mui/material";
 const NetworkGraph = dynamic(() => import('../components/Graph/NetworkGraph'), {
     ssr: false,
 });
@@ -17,6 +18,7 @@ const DRAWER_WIDTH = 320;
 export default function Home() {
   const [selectedItem, setSelectedItem] = useState(null);
   const [editMode, setEditMode] = useState(false);
+  const [isDrawerOpen, setDrawerOpen] = useState(false);
 
   const handleNodeSelect = useCallback((node) => {
     setSelectedItem({ type: 'node', data: node });
@@ -36,21 +38,31 @@ export default function Home() {
   return (
     <Box sx={{ display: 'flex' }}>
       <CssBaseline />
-      <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}>
+      <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }} >
         <Toolbar>
+          <IconButton
+           edge="start"
+           color="inherit"
+           aria-label="menu"
+           onClick={toggleDrawer(true)}
+          >
+           <MenuIcon />
+          </IconButton>
           <Typography variant="h6" noWrap component="div">
             ネットワークグラフ
           </Typography>
         </Toolbar>
       </AppBar>
       <Drawer
+        anchor="left"
+        open={isDrawerOpen}
+        onClose={toggleDrawer(false)}>
         variant="permanent"
         sx={{
           width: DRAWER_WIDTH,
           flexShrink: 0,
           [`& .MuiDrawer-paper`]: { width: DRAWER_WIDTH, boxSizing: 'border-box' },
-        }}
-      >
+        }}>
         <Toolbar />
         <Box sx={{ overflow: 'auto', p: 2 }}>
           <Typography variant="h6" sx={{ mb: 2 }}>
