@@ -1,5 +1,6 @@
 // src/pages/index.js
 import dynamic from "next/dynamic";
+import { styled, alpha } from '@mui/material/styles';
 import { useState, useCallback } from 'react';
 import Box from '@mui/material/Box';
 import CssBaseline from '@mui/material/CssBaseline';
@@ -9,6 +10,8 @@ import Typography from '@mui/material/Typography';
 import Drawer from '@mui/material/Drawer';
 import { IconButton, List, ListItem, ListItemText } from "@mui/material";
 import MenuIcon from "@mui/icons-material/Menu";
+import InputBase from '@mui/material/InputBase';
+import SearchIcon from '@mui/icons-material/Search';
 const NetworkGraph = dynamic(() => import('../components/Graph/NetworkGraph'), {
     ssr: false,
 });
@@ -16,10 +19,66 @@ import EditDrawer from '../components/Drawer/EditDrawer';
 
 const DRAWER_WIDTH = 320;
 
+const Search = styled('div')(({ theme }) => ({
+  position: 'relative',
+  borderRadius: theme.shape.borderRadius,
+  backgroundColor: alpha(theme.palette.common.white, 0.15),
+  '&:hover': {
+    backgroundColor: alpha(theme.palette.common.white, 0.25),
+  },
+  marginLeft: 0,
+  width: '100%',
+  [theme.breakpoints.up('sm')]: {
+    marginLeft: theme.spacing(1),
+    width: 'auto',
+  },
+}));
+
+const SearchIconWrapper = styled('div')(({ theme }) => ({
+  padding: theme.spacing(0, 2),
+  height: '100%',
+  position: 'absolute',
+  pointerEvents: 'none',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+}));
+
+const StyledInputBase = styled(InputBase)(({ theme }) => ({
+  color: 'inherit',
+  width: '100%',
+  '& .MuiInputBase-input': {
+    padding: theme.spacing(1, 1, 1, 0),
+    // vertical padding + font size from searchIcon
+    paddingLeft: `calc(1em + ${theme.spacing(4)})`,
+    transition: theme.transitions.create('width'),
+    [theme.breakpoints.up('sm')]: {
+      width: '12ch',
+      '&:focus': {
+        width: '20ch',
+      },
+    },
+  },
+}));
+
+const Layout = () => {
+  const [searchPattern, setSearchPattern] = useState(null);
+  
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      <SearchAppBar onSearch={setSearchPattern} />
+      <Box sx={{ flexGrow: 1 }}>
+        <NetworkGraph searchPattern={searchPattern} />
+      </Box>
+    </Box>
+  );
+};
+
 export default function Home() {
   const [selectedItem, setSelectedItem] = useState(null);
   const [editMode, setEditMode] = useState(false);
   const [isDrawerOpen, setDrawerOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
 
   const toggleDrawer = () => {
     setDrawerOpen((prevState) => !prevState);
@@ -48,22 +107,67 @@ export default function Home() {
     setDrawerOpen(false);
   };
 
+  // 検索フィルタ適用
+  const applySearchFilter = useCallback(() => {
+    if (!sigmaInstance.current) return;
+
+    const pattern = searchTerm ? new RegExp(searchTerm, 'i') : null;
+
+    sigmaInstance.current.setSetting('nodeReducer', node => ({
+      ...node,
+      hidden: pattern ? !pattern.test(node.label) : false,
+      color: pattern && !pattern.test(node.label) ? '#eee' : node.color
+    }));
+
+    sigmaInstance.current.setSetting('edgeReducer', edge => ({
+      ...edge,
+      hidden: pattern
+        ? !pattern.test(graphData.nodes[edge.source].label) ||
+          !pattern.test(graphData.nodes[edge.target].label)
+        : false
+    }));
+
+    sigmaInstance.current.refresh();
+  }, [searchTerm, graphData]);
+
+  const handleSearch = (e) => {
+    try {
+      const pattern = new RegExp(e.target.value, 'i');
+      onSearch(pattern);
+    } catch {
+      onSearch(null);
+    }
+  };
+
   return (
     <Box sx={{ display: 'flex' }}>
       <CssBaseline />
       <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }} >
         <Toolbar>
-          <IconButton
-           edge="start"
-           color="inherit"
-           aria-label="menu"
-           onClick={toggleDrawer}
-          >
-           <MenuIcon />
-          </IconButton>
-          <Typography variant="h6" noWrap component="div">
-            ネットワークグラフ
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center' }}>
+            <IconButton
+             edge="start"
+             color="inherit"
+             aria-label="menu"
+             onClick={toggleDrawer}
+            >
+              <MenuIcon />
+            </IconButton>
+            <Typography variant="h6" noWrap component="div">
+              ネットワークグラフ
+            </Typography>
+          </Box>
+          <Box sx={{ flexGrow: 1 }} />
+          <Search>
+            <SearchIconWrapper>
+              <SearchIcon />
+            </SearchIconWrapper>
+            <StyledInputBase
+              placeholder="Search…"
+              onChange={handleSearch}
+              inputProps={{ 'aria-label': 'search' }}
+            />
+          </Search>
         </Toolbar>
       </AppBar>
       <div
