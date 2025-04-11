@@ -282,6 +282,8 @@ export default function Home() {
                 transition: 'height 0.3s ease',
                 height: isRibbonOpen ? RIBBON_HEIGHT : 0
                  }}
+                    onMouseEnter={handleRibbonEnter}
+                    onMouseLeave={handleRibbonLeave}
               >
                 <RibbonDrawer
                     isOpen={isRibbonOpen}
