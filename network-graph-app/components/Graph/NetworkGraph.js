@@ -1,8 +1,9 @@
 // src/components/Graph/NetworkGraph.js
 import { useEffect, useRef, useState } from 'react';
 import { MultiDirectedGraph } from 'graphology';
-import Sigma from 'sigma';
+import { Sigma } from 'sigma';
 import { NodeSquareProgram } from '@sigma/node-square';
+import { EdgeCurvedArrowProgram } from "@sigma/edge-curve";
 import { Menu, useContextMenu } from 'react-contexify';
 import 'react-contexify/dist/ReactContexify.css';
 import { initialGraphData } from '../../lib/graphData';
@@ -43,12 +44,24 @@ export default function NetworkGraph({ onNodeSelect, onEdgeSelect }) {
         size: 3,
       });
     });
+    initialGraphData.flows.forEach(flow => {
+      graph.addEdge(flow.source, flow.target, {
+        ...flow,
+        color: flow.color,
+        type: 'curved',
+        curvature: flow.curvature,
+        size: 3,
+      });
+    });
 
     // Sigmaインスタンスの作成
     const renderer = new Sigma(graph, containerRef.current, {
       defaultNodeType: 'square',
       nodeProgramClasses: {
         square: NodeSquareProgram,
+      },
+      edgeProgramClasses: {
+        curved: EdgeCurvedArrowProgram,
       },
       renderEdgeLabels: true,
     });

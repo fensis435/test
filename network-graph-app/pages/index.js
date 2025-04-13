@@ -1,39 +1,66 @@
 import dynamic from "next/dynamic";
-import { useState, useCallback, useRef, useEffect } from 'react';
-import Box from '@mui/material/Box';
-import { Tabs, Tab } from '@mui/material';
-import { ButtonGroup, Button } from '@mui/material';
-import { FormatBold, FormatItalic, FormatUnderlined } from '@mui/icons-material';
-import CssBaseline from '@mui/material/CssBaseline';
-import AppBar from '@mui/material/AppBar';
-import Toolbar from '@mui/material/Toolbar';
-import Typography from '@mui/material/Typography';
-import Drawer from '@mui/material/Drawer';
+import { useState, useCallback, useRef, useEffect } from "react";
+import Box from "@mui/material/Box";
+import { Tabs, Tab } from "@mui/material";
+import { ButtonGroup, Button } from "@mui/material";
+import {
+    FormatBold,
+    FormatItalic,
+    FormatUnderlined,
+} from "@mui/icons-material";
+import CssBaseline from "@mui/material/CssBaseline";
+import AppBar from "@mui/material/AppBar";
+import Toolbar from "@mui/material/Toolbar";
+import Typography from "@mui/material/Typography";
+import Drawer from "@mui/material/Drawer";
 import { IconButton } from "@mui/material";
 import MenuIcon from "@mui/icons-material/Menu";
-import { ArrowDropDown } from '@mui/icons-material';
-import { Menu, MenuItem, Divider, Tooltip, styled } from '@mui/material';
-import { InsertPhoto, TableChart, Link } from '@mui/icons-material';
+import { ArrowDropDown } from "@mui/icons-material";
+import { Menu, MenuItem, Divider, Tooltip, styled, Checkbox, FormControlLabel, useTheme } from "@mui/material";
+import { InsertPhoto, TableChart, Link } from "@mui/icons-material";
+import OutlinedInput from '@mui/material/OutlinedInput';
+import InputLabel from '@mui/material/InputLabel';
+import FormControl from '@mui/material/FormControl';
+import ListItemText from '@mui/material/ListItemText';
+import Select from '@mui/material/Select';
 
-const NetworkGraph = dynamic(() => import('../components/Graph/NetworkGraph'), {
+const ITEM_HEIGHT = 48;
+const ITEM_PADDING_TOP = 8;
+const MenuProps = {
+  PaperProps: {
+    style: {
+      maxHeight: ITEM_HEIGHT * 4.5 + ITEM_PADDING_TOP,
+      width: 250,
+      backgroundColor: '#f5f5f5' // 明るい背景色
+    },
+  },
+};
+
+const NetworkGraph = dynamic(() => import("../components/Graph/NetworkGraph"), {
     ssr: false,
 });
-import EditDrawer from '../components/Drawer/EditDrawer';
+import EditDrawer from "../components/Drawer/EditDrawer";
+import GraphSettingMenu from "../components/Menu/GraphSettingMenu"
 
 const DRAWER_WIDTH = 320;
 const RIBBON_HEIGHT = 112;
+
+const edgeTypes = [
+  'wired',
+  'dataflow',
+];
 
 // カスタムタブコンポーネント
 const WideTab = styled(Tab)({
     minWidth: 120,
     maxWidth: 160,
-    padding: '12px 16px',
-    borderBottom: '2px solid transparent',
-    transition: 'all 0.3s ease',
-    '&.Mui-selected': {
-        backgroundColor: 'rgba(25, 118, 210, 0.08)',
-        borderBottom: '2px solid #1976d2'
-    }
+    padding: "12px 16px",
+    borderBottom: "2px solid transparent",
+    transition: "all 0.3s ease",
+    "&.Mui-selected": {
+        backgroundColor: "rgba(25, 118, 210, 0.08)",
+        borderBottom: "2px solid #1976d2",
+    },
 });
 
 // リボンドロワーコンポーネント
@@ -45,7 +72,7 @@ const RibbonDrawer = ({
     onFontMenuOpen,
     onMenuClose,
     insertAnchorEl,
-    onInsertMenuOpen
+    onInsertMenuOpen,
 }) => {
     return (
         <Drawer
@@ -53,12 +80,12 @@ const RibbonDrawer = ({
             anchor="top"
             open={isOpen}
             sx={{
-                width: '100%',
+                width: "100%",
                 flexShrink: 0,
                 [`& .MuiDrawer-paper`]: {
                     top: 64,
                     height: RIBBON_HEIGHT,
-                    boxSizing: 'border-box',
+                    boxSizing: "border-box",
                 },
             }}
         >
@@ -77,13 +104,19 @@ const RibbonDrawer = ({
                 <Box sx={{ px: 2, py: 1 }}>
                     <ButtonGroup variant="text" sx={{ mr: 2 }}>
                         <Tooltip title="太字 (Ctrl+B)">
-                            <Button><FormatBold fontSize="small" /></Button>
+                            <Button>
+                                <FormatBold fontSize="small" />
+                            </Button>
                         </Tooltip>
                         <Tooltip title="斜体 (Ctrl+I)">
-                            <Button><FormatItalic fontSize="small" /></Button>
+                            <Button>
+                                <FormatItalic fontSize="small" />
+                            </Button>
                         </Tooltip>
                         <Tooltip title="下線 (Ctrl+U)">
-                            <Button><FormatUnderlined fontSize="small" /></Button>
+                            <Button>
+                                <FormatUnderlined fontSize="small" />
+                            </Button>
                         </Tooltip>
                         <Button
                             endIcon={<ArrowDropDown fontSize="small" />}
@@ -120,6 +153,12 @@ export default function Home() {
     const ribbonTimeoutRef = useRef(null);
     const leftDrawerTimeoutRef = useRef(null);
     const [isMouseOverRibbonArea, setIsMouseOverRibbonArea] = useState(false);
+    const [anchorEl, setAnchorEl] = useState(null);
+    const [flowSettings, setFlowSettings] = useState({
+      http: true,
+      ssh: true
+    });
+    const [showEdge, setShowEdge] = useState([]);
 
     // イベントハンドラ
     const toggleDrawer = () => {
@@ -144,12 +183,12 @@ export default function Home() {
     };
 
     const handleNodeSelect = useCallback((node) => {
-        setSelectedItem({ type: 'node', data: node });
+        setSelectedItem({ type: "node", data: node });
         setEditMode(true);
     }, []);
 
     const handleEdgeSelect = useCallback((edge) => {
-        setSelectedItem({ type: 'edge', data: edge });
+        setSelectedItem({ type: "edge", data: edge });
         setEditMode(true);
     }, []);
 
@@ -170,11 +209,11 @@ export default function Home() {
         }, 500);
     };
 
-   // リボンドロワーのホバー処理
+    // リボンドロワーのホバー処理
     const handleRibbonEnter = () => {
         clearTimeout(ribbonTimeoutRef.current);
         setRibbonOpen(true);
-         setIsMouseOverRibbonArea(true);
+        setIsMouseOverRibbonArea(true);
     };
 
     const handleRibbonLeave = () => {
@@ -184,6 +223,32 @@ export default function Home() {
         }, 500);
     };
 
+    const handleFlowSettingChange = (type) => (e) => {
+        setFlowSettings({...flowSettings, [type]: e.target.checked});
+    };
+
+// コンポーネント内
+const theme = useTheme();
+
+  const handleShowEdgeChange = (event) => {
+    const {
+      target: { value },
+    } = event;
+    setShowEdge(
+      // On autofill we get a stringified value.
+      typeof value === 'string' ? value.split(',') : value,
+    );
+  };
+
+  const [settings, setSettings] = useState({});
+
+  const handleSettingsChange = (newSettings) => {
+    setSettings(newSettings);
+    console.log("new settings", newSettings)
+  };
+
+
+
     useEffect(() => {
         return () => {
             clearTimeout(ribbonTimeoutRef.current);
@@ -192,11 +257,14 @@ export default function Home() {
     }, []);
 
     return (
-        <Box sx={{ display: 'flex' }}>
+        <Box sx={{ display: "flex" }}>
             <CssBaseline />
 
             {/* メインAppBar */}
-            <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 2 }}>
+            <AppBar
+                position="fixed"
+                sx={{ zIndex: (theme) => theme.zIndex.drawer + 2 }}
+            >
                 <Toolbar>
                     <IconButton
                         edge="start"
@@ -207,9 +275,15 @@ export default function Home() {
                     >
                         <MenuIcon />
                     </IconButton>
-                    <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1 }}>
+                    <Typography
+                        variant="h6"
+                        noWrap
+                        component="div"
+                        sx={{ flexGrow: 1 }}
+                    >
                         ネットワークグラフ
                     </Typography>
+                    <GraphSettingMenu onSettingsChange={handleSettingsChange} />
                     <IconButton
                         edge="end"
                         color="inherit"
@@ -226,16 +300,16 @@ export default function Home() {
                 onMouseEnter={handleLeftDrawerEnter}
                 onMouseLeave={handleLeftDrawerLeave}
                 sx={{
-                    position: 'fixed',
+                    position: "fixed",
                     left: 0,
                     top: 64,
                     width: 10,
                     height: `calc(100vh - 64px)`,
                     zIndex: (theme) => theme.zIndex.drawer + 1,
-                    '&:hover': {
-                        width: '20px',
-                        backgroundColor: 'rgba(0,0,0,0.1)'
-                    }
+                    "&:hover": {
+                        width: "20px",
+                        backgroundColor: "rgba(0,0,0,0.0)",
+                    },
                 }}
             />
             <Drawer
@@ -248,43 +322,45 @@ export default function Home() {
                     flexShrink: 0,
                     [`& .MuiDrawer-paper`]: {
                         width: DRAWER_WIDTH,
-                        boxSizing: 'border-box',
+                        boxSizing: "border-box",
                         marginTop: 64,
                         height: `calc(100vh - 64px)`,
                     },
                 }}
             >
                 <Toolbar />
-                <Box sx={{ overflow: 'auto', p: 2 }}>
+                <Box sx={{ overflow: "auto", p: 2 }}>
                     <Typography variant="h6" sx={{ mb: 2 }}>
                         ネットワーク管理
                     </Typography>
                 </Box>
             </Drawer>
-
             {/* リボンドロワー */}
-                <Box
-                    style={{
-                        position: 'fixed',
-                        top: 64,
-                        left: 0,
-                        width: '100%',
-                        height: 16,
-                        zIndex: 1200,
-                    }}
-                    onMouseEnter={handleRibbonEnter}
-                    onMouseLeave={handleRibbonLeave}
-                />
-
-              <Box
-                style={{ position: 'fixed', top: 64, width: '100%', zIndex: 1200,
-                overflow: 'hidden',
-                transition: 'height 0.3s ease',
-                height: isRibbonOpen ? RIBBON_HEIGHT : 0
-                 }}
-                    onMouseEnter={handleRibbonEnter}
-                    onMouseLeave={handleRibbonLeave}
-              >
+            <Box
+                style={{
+                    position: "fixed",
+                    top: 64,
+                    left: 0,
+                    width: "100%",
+                    height: 16,
+                    zIndex: 1200,
+                }}
+                onMouseEnter={handleRibbonEnter}
+                onMouseLeave={handleRibbonLeave}
+            />
+            <Box
+                style={{
+                    position: "fixed",
+                    top: 64,
+                    width: "100%",
+                    zIndex: 1200,
+                    overflow: "hidden",
+                    transition: "height 0.3s ease",
+                    height: isRibbonOpen ? RIBBON_HEIGHT : 0,
+                }}
+                onMouseEnter={handleRibbonEnter}
+                onMouseLeave={handleRibbonLeave}
+            >
                 <RibbonDrawer
                     isOpen={isRibbonOpen}
                     tabValue={ribbonTabValue}
@@ -293,10 +369,10 @@ export default function Home() {
                     onFontMenuOpen={handleFontMenuOpen}
                     onMenuClose={handleMenuClose}
                     insertAnchorEl={insertAnchorEl}
-                    onInsertMenuOpen={() => {
-                    }}
+                    onInsertMenuOpen={() => {}}
                 />
-              </Box>
+            </Box>
+
 
             {/* メインコンテンツ */}
             <Box
@@ -304,13 +380,13 @@ export default function Home() {
                 sx={{
                     flexGrow: 1,
                     p: 3,
-                    boxSizing: 'border-box',
+                    boxSizing: "border-box",
                     marginTop: 64 + (isRibbonOpen ? RIBBON_HEIGHT : 0),
-                    minHeight: `calc(100vh - 64px - ${isRibbonOpen ? RIBBON_HEIGHT : 0}px)`
+                    minHeight: `calc(100vh - 64px - ${isRibbonOpen ? RIBBON_HEIGHT : 0}px)`,
                 }}
             >
                 <Toolbar />
-                <Box sx={{ display: 'flex', height: 'calc(100% - 64px)' }}>
+                <Box sx={{ display: "flex", height: "calc(100% - 64px)" }}>
                     <NetworkGraph
                         onNodeSelect={handleNodeSelect}
                         onEdgeSelect={handleEdgeSelect}

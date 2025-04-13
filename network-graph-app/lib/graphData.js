@@ -68,6 +68,26 @@ export const initialGraphData = {
       protocol: 'HTTP/REST',
       bandwidth: '1Gbps'
     },
-  ]
+  ],
+    flows: [
+      { 
+        id: 'flow1', 
+        source: 'server1', 
+        target: 'server2',
+        flowtype: 'http',
+        label: 'HTTP (Port 80)',
+        color: '#ff1744',
+        curvature: 0.3
+      },
+      {
+        id: 'flow2',
+        source: 'router1',
+        target: 'server3',
+        flowtype: 'ssh',
+        label: 'SSH (Port 22)',
+        color: '#00e676',
+        curvature: -0.3
+      }
+    ]
 };
 

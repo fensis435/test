@@ -12,6 +12,7 @@
     "@emotion/styled": "^11.14.0",
     "@mui/icons-material": "^7.0.1",
     "@mui/material": "^7.0.1",
+    "@sigma/edge-curve": "^3.1.0",
     "@sigma/node-square": "^3.0.0",
     "graphology": "^0.26.0",
     "graphology-types": "^0.24.8",
