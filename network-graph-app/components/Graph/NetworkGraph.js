@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { MultiDirectedGraph } from 'graphology';
 import { Sigma } from 'sigma';
 import { NodeSquareProgram } from '@sigma/node-square';
-import { EdgeCurvedArrowProgram } from "@sigma/edge-curve";
+import { EdgeCurvedArrowProgram } from '@sigma/edge-curve';
 import { Menu, useContextMenu } from 'react-contexify';
 import 'react-contexify/dist/ReactContexify.css';
 import { initialGraphData } from '../../lib/graphData';
@@ -15,7 +15,7 @@ export default function NetworkGraph({ onNodeSelect, onEdgeSelect }) {
   const sigmaRef = useRef(null);
   const graphRef = useRef(null);
   const { show } = useContextMenu({
-    id: MENU_ID,
+    id: MENU_ID
   });
 
   const [hoveredNode, setHoveredNode] = useState(null);
@@ -27,43 +27,60 @@ export default function NetworkGraph({ onNodeSelect, onEdgeSelect }) {
     graphRef.current = graph;
 
     // サンプルデータの読み込み
-    initialGraphData.nodes.forEach(node => {
+    initialGraphData.nodes.forEach((node) => {
       graph.addNode(node.id, {
         ...node,
-        x: Math.random() * 10,  // サンプルの初期位置
+        x: Math.random() * 10, // サンプルの初期位置
         y: Math.random() * 10,
         size: 15,
-        type: 'square',  // 四角形のノードを使用
-        imageUrl: node.imageUrl || `/images/server.png`,  // デフォルトイメージ
+        type: 'square', // 四角形のノードを使用
+        imageUrl: node.imageUrl || `/images/server.png` // デフォルトイメージ
       });
     });
 
-    initialGraphData.edges.forEach(edge => {
+    initialGraphData.edges.forEach((edge) => {
       graph.addEdge(edge.source, edge.target, {
         ...edge,
-        size: 3,
+        size: 3
       });
     });
-    initialGraphData.flows.forEach(flow => {
+    initialGraphData.flows.forEach((flow) => {
       graph.addEdge(flow.source, flow.target, {
         ...flow,
         color: flow.color,
         type: 'curved',
         curvature: flow.curvature,
-        size: 3,
+        size: 3
       });
     });
+
+    // 独自のラベル描画関数
+    function customDrawNodeLabel(context, data, settings) {
+      x;
+      const label = data.label;
+      if (!label) return;
+
+      context.save();
+      context.font = 'bold 16px Arial';
+      context.fillStyle = '#ff0000';
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      // ノード中心から少し上にラベルを表示
+      context.fillText(label, data.x, data.y + 20);
+      context.restore();
+    }
 
     // Sigmaインスタンスの作成
     const renderer = new Sigma(graph, containerRef.current, {
       defaultNodeType: 'square',
       nodeProgramClasses: {
-        square: NodeSquareProgram,
+        square: NodeSquareProgram
       },
       edgeProgramClasses: {
-        curved: EdgeCurvedArrowProgram,
+        curved: EdgeCurvedArrowProgram
       },
       renderEdgeLabels: true,
+      labelRenderer: customDrawNodeLabel
     });
     sigmaRef.current = renderer;
 
@@ -79,7 +96,7 @@ export default function NetworkGraph({ onNodeSelect, onEdgeSelect }) {
         ...edgeData,
         id: edge,
         source: graph.source(edge),
-        target: graph.target(edge),
+        target: graph.target(edge)
       });
     });
 
@@ -90,8 +107,8 @@ export default function NetworkGraph({ onNodeSelect, onEdgeSelect }) {
         event: e.event,
         props: {
           type: 'node',
-          id: e.node,
-        },
+          id: e.node
+        }
       });
     });
 
@@ -102,8 +119,8 @@ export default function NetworkGraph({ onNodeSelect, onEdgeSelect }) {
         event: e.event,
         props: {
           type: 'edge',
-          id: e.edge,
-        },
+          id: e.edge
+        }
       });
     });
 
@@ -125,7 +142,7 @@ export default function NetworkGraph({ onNodeSelect, onEdgeSelect }) {
         ...edgeData,
         id: edge,
         source: graphRef.current.source(edge),
-        target: graphRef.current.target(edge),
+        target: graphRef.current.target(edge)
       });
     }
   };
@@ -133,13 +150,19 @@ export default function NetworkGraph({ onNodeSelect, onEdgeSelect }) {
   return (
     <>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
-      
+
       <Menu id={MENU_ID}>
-        <div className="react-contexify__item" onClick={() => handleItemAction('edit')}>
-          <div className="react-contexify__item__content">編集</div>
+        <div
+          className='react-contexify__item'
+          onClick={() => handleItemAction('edit')}
+        >
+          <div className='react-contexify__item__content'>編集</div>
         </div>
-        <div className="react-contexify__item" onClick={() => handleItemAction('delete')}>
-          <div className="react-contexify__item__content">削除</div>
+        <div
+          className='react-contexify__item'
+          onClick={() => handleItemAction('delete')}
+        >
+          <div className='react-contexify__item__content'>削除</div>
         </div>
       </Menu>
     </>

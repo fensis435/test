@@ -7,3 +7,25 @@
 #   ["Action", "Comedy", "Drama", "Horror"].each do |genre_name|
 #     MovieGenre.find_or_create_by!(name: genre_name)
 #   end
+
+if Rails.env.development?
+  # 管理者ユーザーの作成
+  admin_user = User.find_or_create_by(email: 'admin@example.com') do |user|
+    user.name = 'Admin User'
+    user.password = 'password123'
+    user.password_confirmation = 'password123'
+    user.admin = true if user.respond_to?(:admin=)
+  end
+
+  # 一般ユーザーの作成
+  test_user = User.find_or_create_by(email: 'test@example.com') do |user|
+    user.name = 'Test User'
+    user.password = 'password123'
+    user.password_confirmation = 'password123'
+    user.admin = false if user.respond_to?(:admin=)
+  end
+
+  puts "Created users:"
+  puts "Admin: admin@example.com / password123 (admin: #{admin_user.admin? if admin_user.respond_to?(:admin?)})"
+  puts "Test: test@example.com / password123 (admin: #{test_user.admin? if test_user.respond_to?(:admin?)})"
+end

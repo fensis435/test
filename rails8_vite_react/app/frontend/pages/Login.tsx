@@ -15,31 +15,31 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { useSignIn } from 'react-auth-kit';
 import { Link as RouterLink } from 'react-router-dom';
+import { InputAdornment, IconButton } from '@mui/material';
+import { Visibility, VisibilityOff } from '@mui/icons-material';
+import AuthService from '../auth/authService';
 
 export default function Login() {
   const [loading, setLoading] = useState(false);
-  const [form, setForm] = useState({ name: '', email: '', password: '' });
-  const [errors, setErrors] = useState({ name: '', email: '', password: '' });
+  const [form, setForm] = useState({ email: '', password: '' });
+  const [errors, setErrors] = useState({ email: '', password: '' });
   const [serverError, setServerError] = useState('');
   const signIn = useSignIn();
   const navigate = useNavigate();
+  const [showPassword, setShowPassword] = useState(false);
+
+  const togglePasswordVisibility = () => {
+    setShowPassword((prev) => !prev);
+  };
 
   const validate = () => {
-    const newErrors = { name: '', email: '', password: '' };
+    const newErrors = { email: '', password: '' };
     let isValid = true;
-
-    if (!form.name) {
-      newErrors.name = 'Name is required';
-      isValid = false;
-    } else if (!/\S+/.test(form.name)) {
-      newErrors.email = 'Invalid name format';
-      isValid = false;
-    }
 
     if (!form.email) {
       newErrors.email = 'Email is required';
       isValid = false;
-    } else if (!/\S+@\S+\.\S+/.test(form.email)) {
+    } else if (form.email.includes('@') && !/\S+@\S+\.\S+/.test(form.email)) {
       newErrors.email = 'Invalid email format';
       isValid = false;
     }
@@ -67,27 +67,26 @@ export default function Login() {
     setServerError('');
 
     try {
-      const res = await fetch('/api/v1/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form)
+      console.log('form', form, e);
+      const response = await AuthService.login(form.email, form.password);
+
+      // リフレッシュトークンをローカルストレージに保存
+      localStorage.setItem('refreshToken', response.refresh_token);
+
+      // react-auth-kitでサインイン
+      const signInSuccess = signIn({
+        token: response.access_token,
+        expiresIn: 1440, // 24時間（分単位）
+        tokenType: 'Bearer',
+        authState: {
+          id: response.user.id,
+          name: response.user.name,
+          email: response.user.email
+        }
       });
 
-      const data = await res.json();
-
-      if (res.ok && data.token) {
-        const success = signIn({
-          token: data.token,
-          expiresIn: 3600,
-          tokenType: 'Bearer',
-          authState: { email: form.email }
-        });
-
-        if (success) {
-          navigate('/');
-        } else {
-          setServerError('Authentication failed. Please try again.');
-        }
+      if (signInSuccess) {
+        navigate('/');
       } else {
         setServerError(
           data.message || 'Login failed. Please check your credentials.'
@@ -95,6 +94,7 @@ export default function Login() {
       }
     } catch (error) {
       setServerError('Network error. Please try again later.');
+      console.log(error);
     }
 
     setLoading(false);
@@ -134,19 +134,7 @@ export default function Login() {
 
           <form onSubmit={handleSubmit}>
             <TextField
-              label='Name'
-              name='name'
-              type='name'
-              fullWidth
-              required
-              margin='normal'
-              value={form.name}
-              onChange={handleChange}
-              error={!!errors.name}
-              helperText={errors.name}
-            />
-            <TextField
-              label='Email'
+              label='Username or Email'
               name='email'
               type='email'
               fullWidth
@@ -160,7 +148,7 @@ export default function Login() {
             <TextField
               label='Password'
               name='password'
-              type='password'
+              type={showPassword ? 'text' : 'password'}
               fullWidth
               required
               margin='normal'
@@ -168,7 +156,26 @@ export default function Login() {
               onChange={handleChange}
               error={!!errors.password}
               helperText={errors.password}
+              InputProps={{
+                endAdornment: (
+                  <InputAdornment
+                    position='end'
+                    sx={{ backgroundColor: 'transparent' }}
+                  >
+                    <IconButton
+                      aria-label='toggle password visibility'
+                      onClick={togglePasswordVisibility}
+                      edge='end'
+                      disableRipple
+                      sx={{ backgroundColor: 'transparent !important' }}
+                    >
+                      {showPassword ? <VisibilityOff /> : <Visibility />}
+                    </IconButton>
+                  </InputAdornment>
+                )
+              }}
             />
+
             <FormControlLabel
               control={<Checkbox />}
               label='Remember me'

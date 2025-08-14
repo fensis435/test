@@ -24,5 +24,12 @@ module MuiSample
     # config.time_zone = "Central Time (US & Canada)"
     # config.eager_load_paths << Rails.root.join("extras")
     config.api_only = true
+
+    # JWTトークンの有効期限設定
+    config.jwt_expiration_hours = 24
+    config.jwt_refresh_expiration_days = 7
+    
+    # 新規登録の許可設定
+    config.allow_registration = ENV.fetch('ALLOW_REGISTRATION', 'true') == 'true'
   end
 end

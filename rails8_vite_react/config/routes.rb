@@ -2,36 +2,45 @@ Rails.application.routes.draw do
   # API routes only
   namespace :api do
     namespace :v1 do
-      # RESTful なユーザー管理
-      resources :users, only: [:create, :show, :update, :destroy] do
+      # ユーザー管理
+      #resources :users, only: [:create, :show, :update, :destroy] do
+      resources :users do
         member do
-          get :me # GET /api/v1/users/:id/me
+          put :change_password
+          get :sessions
+        end
+        collection do
+          get :me
+          get :search
         end
       end
       
       # 認証専用
-      post '/auth/login',  to: 'auth#login'
-      post '/auth/logout', to: 'auth#logout'
-      get  '/auth/me',     to: 'auth#me'
+      post   '/auth/login',      to: 'auth#login'
+      post   '/auth/refresh',    to: 'auth#refresh'
+      post   '/auth/logout',     to: 'auth#logout'
+      get    '/auth/me',         to: 'auth#me'
+      delete '/auth/logout_all', to: 'auth#logout_all'
+      get    '/auth/sessions',   to: 'auth#sessions'
 
       # その他のAPIリソース
-      resources :posts do
-        member do
-          post :like
-          delete :like
-        end
-        resources :comments, except: [:new, :edit]
-      end
+      #resources :posts do
+      #  member do
+      #    post :like
+      #    delete :like
+      #  end
+      #  resources :comments, except: [:new, :edit]
+      #end
 
-      resources :categories, only: [:index, :show, :create, :update, :destroy]
-      resources :tags, only: [:index, :show, :create, :destroy]
-      resources :uploads, only: [:create, :show, :destroy]
-      resources :notifications, only: [:index, :show, :update]
+      #resources :categories, only: [:index, :show, :create, :update, :destroy]
+      #resources :tags, only: [:index, :show, :create, :destroy]
+      #resources :uploads, only: [:create, :show, :destroy]
+      #resources :notifications, only: [:index, :show, :update]
 
-      # 検索機能
-      get '/search', to: 'search#index'
-      get '/search/users', to: 'search#users'
-      get '/search/posts', to: 'search#posts'
+      ## 検索機能
+      #get '/search', to: 'search#index'
+      #get '/search/users', to: 'search#users'
+      #get '/search/posts', to: 'search#posts'
     end
   end
   

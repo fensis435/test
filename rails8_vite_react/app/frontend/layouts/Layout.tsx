@@ -15,6 +15,12 @@ import { Menu as MenuIcon } from "@mui/icons-material";
 import { NavigationDrawer } from "../components/NavigationDrawer";
 import { AppNavigationList } from "../components/AppNavigationList";
 
+import { Person, Email, Tag } from '@mui/icons-material';
+import { useAuth } from '../hooks/useAuth';
+import LogoutButton from '../components/LogoutButton';
+import SessionManager from '../components/SessionManager';
+
+
 const Toolbar = styled(MuiToolbar)(({ theme }) => ({
   padding: theme.spacing(0, 2.5),
   [theme.breakpoints.up("sm")]: {
@@ -25,6 +31,7 @@ const Toolbar = styled(MuiToolbar)(({ theme }) => ({
 export const Layout: FC = () => {
   const [isOpen, setIsOpen] = useState(false);
   const isPc = useMediaQuery<Theme>((theme) => theme.breakpoints.up("sm"));
+  const { user } = useAuth();
 
   // URLが変わった時に、SPの場合は閉じる
   const { pathname } = useLocation();
@@ -58,7 +65,15 @@ export const Layout: FC = () => {
           >
             <MenuIcon />
           </IconButton>
-          <Typography>MUIアプリケーション</Typography>
+          <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
+            Dashboard
+          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <Typography variant="body1">
+              Welcome, {user?.name}
+            </Typography>
+            <LogoutButton showLogoutAll={true} variant="outlined" />
+          </Box>
         </Toolbar>
       </AppBar>
       {/* NavigationDrawer */}
