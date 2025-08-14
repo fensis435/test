@@ -1,16 +1,46 @@
 Rails.application.routes.draw do
-  get "home/index"
-  # Define your application routes per the DSL in https://guides.rubyonrails.org/routing.html
+  # API routes only
+  namespace :api do
+    namespace :v1 do
+      # RESTful なユーザー管理
+      resources :users, only: [:create, :show, :update, :destroy] do
+        member do
+          get :me # GET /api/v1/users/:id/me
+        end
+      end
+      
+      # 認証専用
+      post '/auth/login',  to: 'auth#login'
+      post '/auth/logout', to: 'auth#logout'
+      get  '/auth/me',     to: 'auth#me'
 
-  # Reveal health status on /up that returns 200 if the app boots with no exceptions, otherwise 500.
-  # Can be used by load balancers and uptime monitors to verify that the app is live.
-  get "up" => "rails/health#show", as: :rails_health_check
+      # その他のAPIリソース
+      resources :posts do
+        member do
+          post :like
+          delete :like
+        end
+        resources :comments, except: [:new, :edit]
+      end
 
-  # Render dynamic PWA files from app/views/pwa/* (remember to link manifest in application.html.erb)
-  # get "manifest" => "rails/pwa#manifest", as: :pwa_manifest
-  # get "service-worker" => "rails/pwa#service_worker", as: :pwa_service_worker
+      resources :categories, only: [:index, :show, :create, :update, :destroy]
+      resources :tags, only: [:index, :show, :create, :destroy]
+      resources :uploads, only: [:create, :show, :destroy]
+      resources :notifications, only: [:index, :show, :update]
 
-  # Defines the root path route ("/")
-  # root "posts#index"
-  root "home#index"
+      # 検索機能
+      get '/search', to: 'search#index'
+      get '/search/users', to: 'search#users'
+      get '/search/posts', to: 'search#posts'
+    end
+  end
+  
+  # Health check for monitoring
+  get '/health', to: 'health#check'
+  
+  # React SPA用 - すべてのHTMLリクエストをReactに委譲
+  root 'frontend#index'
+  get '*path', to: 'frontend#index', constraints: ->(req) { 
+    !req.xhr? && req.format.html? && !req.path.start_with?('/api')
+  }
 end

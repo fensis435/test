@@ -1,0 +1,39 @@
+import { useSignIn } from 'react-auth-kit';
+import { useState } from 'react';
+import type { AuthState } from '../types/AuthState';
+
+const Login: React.FC = () => {
+  const signIn = useSignIn();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  console.log('signIn:', signIn);
+  const handleLogin = async () => {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    const data = await res.json();
+    if (res.ok) {
+      signIn({
+        token: data.token,
+        expiresIn: 3600,
+        tokenType: 'Bearer',
+        authState: { email } as AuthState,
+      });
+    } else {
+      alert('ログイン失敗');
+    }
+  };
+
+  return (
+    <div>
+      <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" />
+      <input value={password} onChange={e => setPassword(e.target.value)} type="password" placeholder="Password" />
+      <button onClick={handleLogin}>Login</button>
+    </div>
+  );
+};
+
+export default Login;
