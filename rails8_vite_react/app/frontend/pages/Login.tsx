@@ -18,6 +18,7 @@ import { Link as RouterLink } from 'react-router-dom';
 import { InputAdornment, IconButton } from '@mui/material';
 import { Visibility, VisibilityOff } from '@mui/icons-material';
 import AuthService from '../auth/authService';
+import type { AuthState } from '../types/AuthState';
 
 export default function Login() {
   const [loading, setLoading] = useState(false);
@@ -67,7 +68,6 @@ export default function Login() {
     setServerError('');
 
     try {
-      console.log('form', form, e);
       const response = await AuthService.login(form.email, form.password);
 
       // リフレッシュトークンをローカルストレージに保存
@@ -78,11 +78,7 @@ export default function Login() {
         token: response.access_token,
         expiresIn: 1440, // 24時間（分単位）
         tokenType: 'Bearer',
-        authState: {
-          id: response.user.id,
-          name: response.user.name,
-          email: response.user.email
-        }
+        authState: response.user
       });
 
       if (signInSuccess) {

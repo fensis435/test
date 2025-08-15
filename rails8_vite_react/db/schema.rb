@@ -45,13 +45,13 @@ ActiveRecord::Schema[8.0].define(version: 2025_08_14_060638) do
     t.string "name"
     t.string "email"
     t.string "password_digest"
-    t.boolean "admin", default: false, null: false
+    t.string "role", default: "regular", null: false
     t.integer "logout_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
-    t.index ["admin"], name: "index_users_on_admin"
     t.index ["email"], name: "index_users_on_email", unique: true
     t.index ["logout_at"], name: "index_users_on_logout_at"
+    t.index ["role"], name: "index_users_on_role"
   end
 
   add_foreign_key "blacklisted_tokens", "users"

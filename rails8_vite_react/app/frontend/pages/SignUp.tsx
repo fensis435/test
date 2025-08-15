@@ -11,6 +11,7 @@ import {
 } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
 import { useSignIn } from 'react-auth-kit';
+import type { AuthState } from '../types/AuthState';
 
 export default function SignUp() {
   const [loading, setLoading] = useState(false);
@@ -31,7 +32,12 @@ export default function SignUp() {
   const navigate = useNavigate();
 
   const validate = () => {
-    const newErrors = { name: '', email: '', password: '', password_confirmation: '' };
+    const newErrors = {
+      name: '',
+      email: '',
+      password: '',
+      password_confirmation: ''
+    };
     let isValid = true;
 
     if (!form.name) {
@@ -95,7 +101,7 @@ export default function SignUp() {
           token: data.token,
           expiresIn: 3600,
           tokenType: 'Bearer',
-          authState: { email: form.email }
+          authState: data.user
         });
 
         if (success) {

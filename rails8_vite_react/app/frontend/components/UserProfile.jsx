@@ -55,7 +55,7 @@ const UserProfile = ({ userId, isCurrentUser = false }) => {
   });
   const [formErrors, setFormErrors] = useState({});
 
-  const authHeader = useAuthHeader();
+  const getAuthHeader = useAuthHeader();
   const { addNotification } = useNotification();
 
   useEffect(() => {
@@ -66,6 +66,7 @@ const UserProfile = ({ userId, isCurrentUser = false }) => {
     try {
       setError('');
       setLoading(true);
+      const authHeader = getAuthHeader();
       const accessToken = authHeader?.replace('Bearer ', '');
 
       const response = isCurrentUser
@@ -131,6 +132,7 @@ const UserProfile = ({ userId, isCurrentUser = false }) => {
 
     try {
       setSubmitting(true);
+      const authHeader = getAuthHeader();
       const accessToken = authHeader?.replace('Bearer ', '');
 
       await UserService.updateUser(user.id, { user: editForm }, accessToken);
@@ -151,6 +153,7 @@ const UserProfile = ({ userId, isCurrentUser = false }) => {
 
     try {
       setSubmitting(true);
+      const authHeader = getAuthHeader();
       const accessToken = authHeader?.replace('Bearer ', '');
 
       await UserService.changePassword(user.id, passwordForm, accessToken);

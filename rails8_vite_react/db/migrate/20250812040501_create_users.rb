@@ -4,7 +4,7 @@ class CreateUsers < ActiveRecord::Migration[8.0]
       t.string  :name
       t.string  :email
       t.string  :password_digest
-      t.boolean :admin, default: false, null: false
+      t.string  :role, default: "regular", null: false
       t.integer :logout_at, comment: "全ログアウトした時刻のUnixタイムスタンプ"
 
       t.timestamps
@@ -12,6 +12,6 @@ class CreateUsers < ActiveRecord::Migration[8.0]
 
     add_index :users, :email, unique: true
     add_index :users, :logout_at
-    add_index :users, :admin
+    add_index :users, :role
   end
 end

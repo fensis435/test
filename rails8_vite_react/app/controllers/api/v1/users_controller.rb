@@ -30,6 +30,7 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
         id: @user.id,
         name: @user.name,
         email: @user.email,
+        role: @user.role,
         created_at: @user.created_at,
         updated_at: @user.updated_at,
         active_sessions_count: @user.active_sessions_count
@@ -45,6 +46,7 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
         id: current_user.id,
         name: current_user.name,
         email: current_user.email,
+        role: current_user.role,
         created_at: current_user.created_at,
         updated_at: current_user.updated_at,
         active_sessions_count: current_user.active_sessions_count
@@ -82,7 +84,8 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
           user: {
             id: @user.id,
             name: @user.name,
-            email: @user.email
+            email: @user.email,
+            role: @user.role
           },
           access_token: access_token,
           refresh_token: refresh_token
@@ -94,6 +97,7 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
             id: @user.id,
             name: @user.name,
             email: @user.email,
+            role: @user.role,
             created_at: @user.created_at
           }
         }, status: :created
@@ -204,6 +208,7 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
     sessions = @user.user_sessions.active.refresh_tokens
                    .select(:id, :device_info, :created_at, :last_used_at)
                    .order(created_at: :desc)
+                   .to_a
 
     render json: {
       sessions: sessions,
@@ -241,8 +246,11 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
   end
 
   def current_user_admin?
-    # 管理者フラグがある場合はそれを使用、なければ仮実装
-    current_user[:user].respond_to?(:admin?) ? current_user[:user].admin? : false
+    (current_user[:user].role == "admin")
+  end
+
+  def current_user_role
+    current_user[:user].role
   end
 
   def registration_allowed?

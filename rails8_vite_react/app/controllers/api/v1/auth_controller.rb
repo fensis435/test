@@ -29,7 +29,8 @@ class Api::V1::AuthController < Api::V1::PublicController
         user: {
           id: @user.id,
           name: @user.name,
-          email: @user.email
+          email: @user.email,
+          role: @user.role
         }
       }, status: :ok
     else
@@ -117,6 +118,7 @@ class Api::V1::AuthController < Api::V1::PublicController
     sessions = current_user.user_sessions.active.refresh_tokens
                           .select(:id, :device_info, :created_at)
                           .order(created_at: :desc)
+                          .to_a
     
     render json: { 
       sessions: sessions,
@@ -149,7 +151,8 @@ class Api::V1::AuthController < Api::V1::PublicController
     {
       id: user.id,
       email: user.email,
-      name: user.name
+      name: user.name,
+      role: user.role
     }
   end
 

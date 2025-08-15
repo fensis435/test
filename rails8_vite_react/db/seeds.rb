@@ -14,7 +14,7 @@ if Rails.env.development?
     user.name = 'Admin User'
     user.password = 'password123'
     user.password_confirmation = 'password123'
-    user.admin = true if user.respond_to?(:admin=)
+    user.role = 'admin'
   end
 
   # 一般ユーザーの作成
@@ -22,10 +22,10 @@ if Rails.env.development?
     user.name = 'Test User'
     user.password = 'password123'
     user.password_confirmation = 'password123'
-    user.admin = false if user.respond_to?(:admin=)
+    user.role = 'regular'
   end
 
   puts "Created users:"
-  puts "Admin: admin@example.com / password123 (admin: #{admin_user.admin? if admin_user.respond_to?(:admin?)})"
-  puts "Test: test@example.com / password123 (admin: #{test_user.admin? if test_user.respond_to?(:admin?)})"
+  puts "Admin: admin@example.com / password123 / admin"
+  puts "Test: test@example.com / password123 / regular"
 end

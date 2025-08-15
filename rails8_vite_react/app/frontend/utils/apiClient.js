@@ -1,5 +1,5 @@
 class ApiClient {
-  static baseURL = 'http://localhost:3000/api/v1';
+  static baseURL = import.meta.env.VITE_API_BASE_URL;
 
   static async request(endpoint, options = {}) {
     const url = `${this.baseURL}${endpoint}`;
@@ -23,7 +23,7 @@ class ApiClient {
       if (!response.ok) {
         throw new Error(data.error || `HTTP error! status: ${response.status}`);
       }
-
+      console.log('response', response, data);
       return data;
     } catch (error) {
       console.error('API request failed:', error);

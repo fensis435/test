@@ -13,7 +13,8 @@ import {
   CircularProgress,
   Alert,
   IconButton,
-  Tooltip
+  Tooltip,
+  Button,
 } from '@mui/material';
 import {
   Computer,
@@ -28,7 +29,7 @@ const SessionManager = () => {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const authHeader = useAuthHeader();
+  const getAuthHeader = useAuthHeader();
 
   useEffect(() => {
     fetchSessions();
@@ -36,6 +37,7 @@ const SessionManager = () => {
 
   const fetchSessions = async () => {
     try {
+      const authHeader = getAuthHeader();
       setError('');
       setLoading(true);
       const accessToken = authHeader?.replace('Bearer ', '');

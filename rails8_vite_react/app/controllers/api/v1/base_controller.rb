@@ -45,6 +45,6 @@ class Api::V1::BaseController < Api::BaseController
   end
 
   def admin?
-    authenticated? && current_user.admin?
+    authenticated? && (current_user.role == "admin")
   end
 end
