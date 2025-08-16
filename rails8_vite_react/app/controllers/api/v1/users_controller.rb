@@ -240,13 +240,13 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
   end
 
   def ensure_owner_or_admin
-    unless @user.id == current_user[:user].id || current_user_admin?
+    unless @user.id == current_user.id || current_user_admin?
       render json: { error: 'Access denied' }, status: :forbidden
     end
   end
 
   def current_user_admin?
-    (current_user[:user].role == "admin")
+    (current_user.role == "admin")
   end
 
   def current_user_role

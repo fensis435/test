@@ -173,7 +173,7 @@ const UserList = ({ onEditUser, onRegisterUser, onViewUser }) => {
   };
 
   const isCurrentUser = (user) => {
-    return authUser()?.id === user.id;
+    return authUser?.id === user.id;
   };
 
   const paginatedUsers = searchResults.slice(
@@ -263,7 +263,11 @@ const UserList = ({ onEditUser, onRegisterUser, onViewUser }) => {
                           )}
                         </Avatar>
                         <Box>
-                          <Typography variant='body1' fontWeight='medium'>
+                          <Typography
+                            variant='body1'
+                            fontWeight='medium'
+                            component='span'
+                          >
                             {user.name}
                             {isCurrentUser(user) && (
                               <Chip label='You' size='small' sx={{ ml: 1 }} />
