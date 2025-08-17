@@ -13,6 +13,21 @@ class User < ApplicationRecord
 
   scope :admins, -> { where(admin: true) }
   scope :regular_users, -> { where(admin: false) }
+
+  enum :app_status, {
+    not_deployed: 'not_deployed',
+    running:      'running',
+    stopped:      'stopped',
+    starting:     'starting',
+    error:        'error'
+  }
+
+  scope :with_running_apps, -> { where(app_status: 'running') }
+  scope :with_deployed_apps, -> { where.not(app_status: 'not_deployed') }
+  scope :session_expired, ->(timeout_minutes = 30) {
+    where('last_login_at < ?', timeout_minutes.minutes.ago)
+  }
+
   
   # セッション作成
   def create_session(jti, token_type, exp, device_info = nil)
@@ -22,6 +37,10 @@ class User < ApplicationRecord
       exp: exp,
       device_info: device_info
     )
+  end
+
+  def dstroy_session(jti)
+    user_sessions.where(jti: jti).destroy_all
   end
 
   # アクティブなセッション数

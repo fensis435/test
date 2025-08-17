@@ -85,6 +85,9 @@ class Api::V1::AuthController < Api::V1::PublicController
     if current_token
       jti = current_token[:jti]
       exp = current_token[:exp]
+
+      # セッションを削除
+      current_user.user_sessions.where(jti: jti).destroy_all
       
       # アクセストークンをブラックリストに追加
       TokenBlacklistService.blacklist_token(jti, exp, current_user.id)
@@ -110,6 +113,7 @@ class Api::V1::AuthController < Api::V1::PublicController
   def logout_all
     # 特定ユーザーのすべてのセッションを無効化
     TokenBlacklistService.blacklist_user_all_tokens(current_user.id)
+    current_user.user_sessions.destroy_all
     render json: { message: 'Successfully logged out from all devices' }, status: :ok
   end
 

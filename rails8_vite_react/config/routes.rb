@@ -18,10 +18,33 @@ Rails.application.routes.draw do
       # 認証専用
       post   '/auth/login',      to: 'auth#login'
       post   '/auth/refresh',    to: 'auth#refresh'
-      post   '/auth/logout',     to: 'auth#logout'
+      delete '/auth/logout',     to: 'auth#logout'
       get    '/auth/me',         to: 'auth#me'
       delete '/auth/logout_all', to: 'auth#logout_all'
       get    '/auth/sessions',   to: 'auth#sessions'
+
+      # User app management
+      resource :user_app, only: [:show] do
+        member do
+          post :deploy
+          delete :undeploy
+          post :start
+          post :stop
+          post :restart
+          get :logs
+        end
+      end
+
+      # Admin maintenance
+      namespace :admin do
+        resource :maintenance, only: [:show] do
+          member do
+            post :cleanup_orphaned
+            post :force_deploy
+            post :force_undeploy
+          end
+        end
+      end
 
       # その他のAPIリソース
       #resources :posts do

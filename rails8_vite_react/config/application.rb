@@ -31,5 +31,19 @@ module MuiSample
     
     # 新規登録の許可設定
     config.allow_registration = ENV.fetch('ALLOW_REGISTRATION', 'true') == 'true'
+
+    # Kubernetes configuration
+    config.helm_chart_path = ENV['HELM_CHART_PATH'] || './helm-charts/user-app'
+    config.helm_chart_name = ENV['HELM_CHART_NAME'] || 'user-app'
+    config.helm_values_file = ENV['HELM_VALUES_FILE'] || './helm-charts/user-app/values.yaml'
+    config.app_image_tag = ENV['APP_IMAGE_TAG'] || 'latest'
+    config.app_base_domain = ENV['APP_BASE_DOMAIN'] || 'app.example.com'
+
+    # Session and lifecycle configuration
+    config.session_timeout_minutes = ENV['SESSION_TIMEOUT_MINUTES']&.to_i || 30
+    config.auto_deploy_user_apps = ENV['AUTO_DEPLOY_USER_APPS'] == 'true'
+
+    # Job queues
+    config.active_job.queue_adapter = :sidekiq
   end
 end

@@ -47,9 +47,18 @@ ActiveRecord::Schema[8.0].define(version: 2025_08_14_060638) do
     t.string "password_digest"
     t.string "role", default: "regular", null: false
     t.integer "logout_at"
+    t.string "k8s_namespace"
+    t.string "k8s_release_name"
+    t.string "app_url"
+    t.string "app_status", default: "not_deployed"
+    t.datetime "last_login_at"
+    t.datetime "timestamp"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.index ["app_status"], name: "index_users_on_app_status"
     t.index ["email"], name: "index_users_on_email", unique: true
+    t.index ["k8s_namespace"], name: "index_users_on_k8s_namespace"
+    t.index ["last_login_at"], name: "index_users_on_last_login_at"
     t.index ["logout_at"], name: "index_users_on_logout_at"
     t.index ["role"], name: "index_users_on_role"
   end

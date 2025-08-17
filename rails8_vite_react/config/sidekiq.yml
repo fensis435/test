@@ -1,0 +1,13 @@
+:concurrency: 10
+:timeout: 60
+:verbose: false
+:queues:
+  - critical
+  - k8s_operations
+  - default
+  - low
+
+:scheduler:
+  session_timeout_monitor:
+    every: '5m'
+    class: SessionTimeoutMonitorJob

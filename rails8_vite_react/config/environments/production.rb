@@ -87,4 +87,15 @@ Rails.application.configure do
   #
   # Skip DNS rebinding protection for the default health check endpoint.
   # config.host_authorization = { exclude: ->(request) { request.path == "/up" } }
+
+  # Kubernetes API設定
+  config.k8s_api_endpoint = ENV.fetch('K8S_API_ENDPOINT', 'https://kubernetes.default.svc')
+  config.k8s_token = File.read('/var/run/secrets/kubernetes.io/serviceaccount/token') rescue ENV['K8S_TOKEN']
+  config.k8s_verify_ssl = true
+
+  # ログレベル調整
+  config.log_level = :info
+
+  # Background job設定
+  config.active_job.queue_adapter = :sidekiq
 end
