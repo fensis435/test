@@ -1,16 +1,9 @@
 // src/components/UserList.jsx
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Card,
   CardContent,
   Typography,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-  Paper,
   IconButton,
   Chip,
   Avatar,
@@ -29,8 +22,22 @@ import {
   Menu,
   MenuItem,
   Fade,
-  TablePagination
+  Select,
+  FormControl,
+  InputLabel,
+  OutlinedInput
 } from '@mui/material';
+import {
+  DataGrid,
+  GridActionsCellItem,
+  GridRowModes,
+  GridRowModesModel,
+  GridToolbarContainer,
+  GridToolbarColumnsButton,
+  GridToolbarFilterButton,
+  GridToolbarExport,
+  GridToolbarDensitySelector
+} from '@mui/x-data-grid';
 import {
   Person,
   Search,
@@ -42,24 +49,58 @@ import {
   AdminPanelSettings,
   PersonOutline,
   Email,
-  Schedule
+  Schedule,
+  Save,
+  Cancel,
+  Refresh
 } from '@mui/icons-material';
 import { useAuthHeader, useAuthUser } from 'react-auth-kit';
 import { useNotification } from '../context/NotificationContext';
 import UserService from '../services/userService';
 
+// Custom toolbar component
+const CustomToolbar = ({ onAddUser, onRefresh, refreshing }) => {
+  return (
+    <GridToolbarContainer>
+      <Box display="flex" justifyContent="space-between" width="100%" alignItems="center">
+        <Box>
+          <GridToolbarColumnsButton />
+          <GridToolbarFilterButton />
+          <GridToolbarDensitySelector />
+          <GridToolbarExport />
+        </Box>
+        <Box>
+          <Button
+            size="small"
+            startIcon={refreshing ? <CircularProgress size={16} /> : <Refresh />}
+            onClick={onRefresh}
+            disabled={refreshing}
+            sx={{ mr: 1 }}
+          >
+            Refresh
+          </Button>
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={<Add />}
+            onClick={onAddUser}
+          >
+            Add User
+          </Button>
+        </Box>
+      </Box>
+    </GridToolbarContainer>
+  );
+};
+
 const UserList = ({ onEditUser, onRegisterUser, onViewUser }) => {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [searchResults, setSearchResults] = useState([]);
+  const [refreshing, setRefreshing] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [userToDelete, setUserToDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
-  const [menuAnchor, setMenuAnchor] = useState(null);
-  const [selectedUser, setSelectedUser] = useState(null);
-  const [page, setPage] = useState(0);
-  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [rowModesModel, setRowModesModel] = useState({});
   const [error, setError] = useState('');
 
   const getAuthHeader = useAuthHeader();
@@ -72,49 +113,28 @@ const UserList = ({ onEditUser, onRegisterUser, onViewUser }) => {
     fetchUsers();
   }, []);
 
-  useEffect(() => {
-    if (searchTerm.trim()) {
-      handleSearch();
-    } else {
-      setSearchResults(users);
-    }
-  }, [searchTerm, users]);
-
-  const fetchUsers = async () => {
+  const fetchUsers = async (showRefreshing = false) => {
     try {
-      setLoading(true);
+      if (showRefreshing) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
       setError('');
       const accessToken = authHeader?.replace('Bearer ', '');
       const response = await UserService.getAllUsers(accessToken);
       setUsers(response.users || []);
-      setSearchResults(response.users || []);
     } catch (error) {
       setError(error.message);
       addNotification('Failed to fetch users: ' + error.message, 'error');
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
-  const handleSearch = async () => {
-    if (!searchTerm.trim()) {
-      setSearchResults(users);
-      return;
-    }
-
-    try {
-      const accessToken = authHeader?.replace('Bearer ', '');
-      const response = await UserService.searchUsers(searchTerm, accessToken);
-      setSearchResults(response.users || []);
-    } catch (error) {
-      // フォールバック: クライアントサイドフィルタリング
-      const filtered = users.filter(
-        (user) =>
-          user.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          user.email.toLowerCase().includes(searchTerm.toLowerCase())
-      );
-      setSearchResults(filtered);
-    }
+  const handleRefresh = () => {
+    fetchUsers(true);
   };
 
   const handleDeleteUser = async () => {
@@ -131,7 +151,7 @@ const UserList = ({ onEditUser, onRegisterUser, onViewUser }) => {
       );
       setDeleteDialogOpen(false);
       setUserToDelete(null);
-      fetchUsers();
+      fetchUsers(true);
     } catch (error) {
       addNotification('Failed to delete user: ' + error.message, 'error');
     } finally {
@@ -139,30 +159,64 @@ const UserList = ({ onEditUser, onRegisterUser, onViewUser }) => {
     }
   };
 
-  const openDeleteDialog = (user) => {
+  const openDeleteDialog = useCallback((user) => {
     setUserToDelete(user);
     setDeleteDialogOpen(true);
-    handleCloseMenu();
-  };
+  }, []);
 
-  const handleMenuOpen = (event, user) => {
-    setMenuAnchor(event.currentTarget);
-    setSelectedUser(user);
-  };
+  const handleRowEditStart = useCallback((params, event) => {
+    event.defaultMuiPrevented = true;
+  }, []);
 
-  const handleCloseMenu = () => {
-    setMenuAnchor(null);
-    setSelectedUser(null);
-  };
+  const handleRowEditStop = useCallback((params, event) => {
+    event.defaultMuiPrevented = true;
+  }, []);
 
-  const handleChangePage = (event, newPage) => {
-    setPage(newPage);
-  };
+  const handleEditClick = useCallback((id) => () => {
+    setRowModesModel({ ...rowModesModel, [id]: { mode: GridRowModes.Edit } });
+  }, [rowModesModel]);
 
-  const handleChangeRowsPerPage = (event) => {
-    setRowsPerPage(parseInt(event.target.value, 10));
-    setPage(0);
-  };
+  const handleSaveClick = useCallback((id) => () => {
+    setRowModesModel({ ...rowModesModel, [id]: { mode: GridRowModes.View } });
+  }, [rowModesModel]);
+
+  const handleCancelClick = useCallback((id) => () => {
+    setRowModesModel({
+      ...rowModesModel,
+      [id]: { mode: GridRowModes.View, ignoreModifications: true },
+    });
+  }, [rowModesModel]);
+
+  const handleViewClick = useCallback((user) => () => {
+    onViewUser(user);
+  }, [onViewUser]);
+
+  const processRowUpdate = useCallback(async (newRow) => {
+    try {
+      const accessToken = authHeader?.replace('Bearer ', '');
+      const updatedUser = await UserService.updateUser(newRow.id, {
+        name: newRow.name,
+        email: newRow.email,
+        role: newRow.role,
+      }, accessToken);
+
+      addNotification('User updated successfully', 'success');
+      
+      // Update local state
+      setUsers(users.map(user => 
+        user.id === newRow.id ? { ...user, ...updatedUser } : user
+      ));
+      
+      return newRow;
+    } catch (error) {
+      addNotification('Failed to update user: ' + error.message, 'error');
+      throw error;
+    }
+  }, [authHeader, addNotification, users]);
+
+  const handleProcessRowUpdateError = useCallback((error) => {
+    console.error('Row update error:', error);
+  }, []);
 
   const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString('ja-JP', {
@@ -172,20 +226,174 @@ const UserList = ({ onEditUser, onRegisterUser, onViewUser }) => {
     });
   };
 
-  const isCurrentUser = (user) => {
-    return authUser?.id === user.id;
+  const isCurrentUser = (userId) => {
+    return authUser?.id === userId;
   };
 
-  const paginatedUsers = searchResults.slice(
-    page * rowsPerPage,
-    page * rowsPerPage + rowsPerPage
-  );
+  const columns = [
+    {
+      field: 'user',
+      headerName: 'User',
+      width: 250,
+      renderCell: (params) => (
+        <Box display="flex" alignItems="center" gap={2}>
+          <Avatar sx={{ bgcolor: 'primary.main', width: 32, height: 32 }}>
+            {params.row.role === 'admin' ? (
+              <AdminPanelSettings fontSize="small" />
+            ) : (
+              <PersonOutline fontSize="small" />
+            )}
+          </Avatar>
+          <Box>
+            <Typography variant="body2" fontWeight="medium" component='span'>
+              {params.row.name}
+              {isCurrentUser(params.row.id) && (
+                <Chip label="You" size="small" sx={{ ml: 1, height: 20 }} />
+              )}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              ID: {params.row.id}
+            </Typography>
+          </Box>
+        </Box>
+      ),
+      sortable: false,
+      filterable: false,
+    },
+    {
+      field: 'name',
+      headerName: 'Name',
+      width: 180,
+      editable: true,
+    },
+    {
+      field: 'email',
+      headerName: 'Email',
+      width: 220,
+      editable: true,
+      renderCell: (params) => (
+        <Box display="flex" alignItems="center" gap={1}>
+          <Email fontSize="small" color="action" />
+          {params.value}
+        </Box>
+      ),
+    },
+    {
+      field: 'role',
+      headerName: 'Role',
+      width: 120,
+      editable: true,
+      type: 'singleSelect',
+      valueOptions: ['user', 'admin'],
+      renderCell: (params) => (
+        <Chip
+          label={params.value || 'user'}
+          color={params.value === 'admin' ? 'secondary' : 'default'}
+          size="small"
+        />
+      ),
+      renderEditCell: (params) => (
+        <FormControl fullWidth size="small">
+          <Select
+            value={params.value || 'user'}
+            onChange={(event) => params.api.setEditCellValue({
+              id: params.id,
+              field: params.field,
+              value: event.target.value
+            })}
+            input={<OutlinedInput />}
+          >
+            <MenuItem value="user">User</MenuItem>
+            <MenuItem value="admin">Admin</MenuItem>
+          </Select>
+        </FormControl>
+      ),
+    },
+    {
+      field: 'status',
+      headerName: 'Status',
+      width: 120,
+      renderCell: (params) => (
+        <Chip
+          label={params.row.active_sessions_count > 0 ? 'Active' : 'Inactive'}
+          color={params.row.active_sessions_count > 0 ? 'success' : 'default'}
+          size="small"
+          variant="outlined"
+        />
+      ),
+      sortable: false,
+      filterable: false,
+    },
+    {
+      field: 'created_at',
+      headerName: 'Created',
+      width: 140,
+      renderCell: (params) => (
+        <Box display="flex" alignItems="center" gap={1}>
+          <Schedule fontSize="small" color="action" />
+          <Typography variant="body2">
+            {formatDate(params.value)}
+          </Typography>
+        </Box>
+      ),
+    },
+    {
+      field: 'actions',
+      type: 'actions',
+      headerName: 'Actions',
+      width: 120,
+      cellClassName: 'actions',
+      getActions: ({ id, row }) => {
+        const isInEditMode = rowModesModel[id]?.mode === GridRowModes.Edit;
+
+        if (isInEditMode) {
+          return [
+            <GridActionsCellItem
+              icon={<Save />}
+              label="Save"
+              onClick={handleSaveClick(id)}
+              sx={{ color: 'primary.main' }}
+            />,
+            <GridActionsCellItem
+              icon={<Cancel />}
+              label="Cancel"
+              onClick={handleCancelClick(id)}
+              sx={{ color: 'inherit' }}
+            />,
+          ];
+        }
+
+        return [
+          <GridActionsCellItem
+            icon={<Visibility />}
+            label="View"
+            onClick={handleViewClick(row)}
+            sx={{ color: 'info.main' }}
+          />,
+          <GridActionsCellItem
+            icon={<Edit />}
+            label="Edit"
+            onClick={handleEditClick(id)}
+            sx={{ color: 'primary.main' }}
+          />,
+          ...(!isCurrentUser(id) ? [
+            <GridActionsCellItem
+              icon={<Delete />}
+              label="Delete"
+              onClick={() => openDeleteDialog(row)}
+              sx={{ color: 'error.main' }}
+            />
+          ] : []),
+        ];
+      },
+    },
+  ];
 
   if (loading) {
     return (
       <Card>
         <CardContent>
-          <Box display='flex' justifyContent='center' py={4}>
+          <Box display="flex" justifyContent="center" py={4}>
             <CircularProgress />
           </Box>
         </CardContent>
@@ -197,196 +405,60 @@ const UserList = ({ onEditUser, onRegisterUser, onViewUser }) => {
     <>
       <Card>
         <CardContent>
-          <Box
-            display='flex'
-            justifyContent='space-between'
-            alignItems='center'
-            mb={3}
-          >
-            <Typography variant='h5' component='h2'>
+          <Box mb={2}>
+            <Typography variant="h5" component="h2" gutterBottom>
               User Management
             </Typography>
-            <Button
-              variant='contained'
-              startIcon={<Add />}
-              onClick={onRegisterUser}
-            >
-              Add New User
-            </Button>
+            {error && (
+              <Alert severity="error" sx={{ mb: 2 }}>
+                {error}
+              </Alert>
+            )}
           </Box>
 
-          <Box mb={3}>
-            <TextField
-              fullWidth
-              variant='outlined'
-              placeholder='Search users by name or email...'
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              InputProps={{
-                startAdornment: (
-                  <InputAdornment position='start'>
-                    <Search />
-                  </InputAdornment>
-                )
+          <Box sx={{ height: 600, width: '100%' }}>
+            <DataGrid
+              rows={users}
+              columns={columns}
+              pageSizeOptions={[5, 10, 25]}
+              initialState={{
+                pagination: { paginationModel: { pageSize: 10 } },
+              }}
+              editMode="row"
+              rowModesModel={rowModesModel}
+              onRowModesModelChange={setRowModesModel}
+              onRowEditStart={handleRowEditStart}
+              onRowEditStop={handleRowEditStop}
+              processRowUpdate={processRowUpdate}
+              onProcessRowUpdateError={handleProcessRowUpdateError}
+              slots={{
+                toolbar: CustomToolbar,
+              }}
+              slotProps={{
+                toolbar: {
+                  onAddUser: onRegisterUser,
+                  onRefresh: handleRefresh,
+                  refreshing: refreshing,
+                },
+              }}
+              disableRowSelectionOnClick
+              sx={{
+                '& .MuiDataGrid-cell:focus': {
+                  outline: 'none',
+                },
+                '& .MuiDataGrid-row:hover': {
+                  backgroundColor: 'action.hover',
+                },
+                '& .MuiDataGrid-columnHeaders': {
+                  backgroundColor: 'background.default',
+                  borderBottom: '2px solid',
+                  borderBottomColor: 'divider',
+                },
               }}
             />
           </Box>
-
-          {error && (
-            <Alert severity='error' sx={{ mb: 2 }}>
-              {error}
-            </Alert>
-          )}
-
-          <TableContainer component={Paper}>
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableCell>User</TableCell>
-                  <TableCell>Email</TableCell>
-                  <TableCell>Role</TableCell>
-                  <TableCell>Status</TableCell>
-                  <TableCell>Created</TableCell>
-                  <TableCell align='right'>Actions</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {paginatedUsers.map((user) => (
-                  <TableRow key={user.id} hover>
-                    <TableCell>
-                      <Box display='flex' alignItems='center' gap={2}>
-                        <Avatar sx={{ bgcolor: 'primary.main' }}>
-                          {user.role === 'admin' ? (
-                            <AdminPanelSettings />
-                          ) : (
-                            <PersonOutline />
-                          )}
-                        </Avatar>
-                        <Box>
-                          <Typography
-                            variant='body1'
-                            fontWeight='medium'
-                            component='span'
-                          >
-                            {user.name}
-                            {isCurrentUser(user) && (
-                              <Chip label='You' size='small' sx={{ ml: 1 }} />
-                            )}
-                          </Typography>
-                          <Typography variant='body2' color='text.secondary'>
-                            ID: {user.id}
-                          </Typography>
-                        </Box>
-                      </Box>
-                    </TableCell>
-                    <TableCell>
-                      <Box display='flex' alignItems='center' gap={1}>
-                        <Email fontSize='small' color='action' />
-                        {user.email}
-                      </Box>
-                    </TableCell>
-                    <TableCell>
-                      <Chip
-                        label={user.role || 'user'}
-                        color={user.role === 'admin' ? 'secondary' : 'default'}
-                        size='small'
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Chip
-                        label={
-                          user.active_sessions_count > 0 ? 'Active' : 'Inactive'
-                        }
-                        color={
-                          user.active_sessions_count > 0 ? 'success' : 'default'
-                        }
-                        size='small'
-                        variant='outlined'
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Box display='flex' alignItems='center' gap={1}>
-                        <Schedule fontSize='small' color='action' />
-                        {formatDate(user.created_at)}
-                      </Box>
-                    </TableCell>
-                    <TableCell align='right'>
-                      <Tooltip title='More actions'>
-                        <IconButton
-                          onClick={(e) => handleMenuOpen(e, user)}
-                          size='small'
-                        >
-                          <MoreVert />
-                        </IconButton>
-                      </Tooltip>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </TableContainer>
-
-          <TablePagination
-            rowsPerPageOptions={[5, 10, 25]}
-            component='div'
-            count={searchResults.length}
-            rowsPerPage={rowsPerPage}
-            page={page}
-            onPageChange={handleChangePage}
-            onRowsPerPageChange={handleChangeRowsPerPage}
-          />
-
-          {searchResults.length === 0 && !loading && (
-            <Box textAlign='center' py={4}>
-              <Person sx={{ fontSize: 64, color: 'text.secondary', mb: 2 }} />
-              <Typography variant='h6' color='text.secondary'>
-                {searchTerm ? 'No users found' : 'No users available'}
-              </Typography>
-              <Typography variant='body2' color='text.secondary'>
-                {searchTerm
-                  ? 'Try adjusting your search criteria'
-                  : 'Add a new user to get started'}
-              </Typography>
-            </Box>
-          )}
         </CardContent>
       </Card>
-
-      {/* Action Menu */}
-      <Menu
-        anchorEl={menuAnchor}
-        open={Boolean(menuAnchor)}
-        onClose={handleCloseMenu}
-        TransitionComponent={Fade}
-      >
-        <MenuItem
-          onClick={() => {
-            onViewUser(selectedUser);
-            handleCloseMenu();
-          }}
-        >
-          <Visibility fontSize='small' sx={{ mr: 1 }} />
-          View Profile
-        </MenuItem>
-        <MenuItem
-          onClick={() => {
-            onEditUser(selectedUser);
-            handleCloseMenu();
-          }}
-        >
-          <Edit fontSize='small' sx={{ mr: 1 }} />
-          Edit User
-        </MenuItem>
-        {selectedUser && !isCurrentUser(selectedUser) && (
-          <MenuItem
-            onClick={() => openDeleteDialog(selectedUser)}
-            sx={{ color: 'error.main' }}
-          >
-            <Delete fontSize='small' sx={{ mr: 1 }} />
-            Delete User
-          </MenuItem>
-        )}
-      </Menu>
 
       {/* Delete Confirmation Dialog */}
       <Dialog
@@ -409,8 +481,8 @@ const UserList = ({ onEditUser, onRegisterUser, onViewUser }) => {
           </Button>
           <Button
             onClick={handleDeleteUser}
-            color='error'
-            variant='contained'
+            color="error"
+            variant="contained"
             disabled={deleting}
             startIcon={deleting && <CircularProgress size={16} />}
           >
