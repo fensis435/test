@@ -25,6 +25,8 @@ module MuiSample
     # config.eager_load_paths << Rails.root.join("extras")
     config.api_only = true
 
+    # config.eager_load_paths += %W(#{config.root}/lib)
+
     # JWTトークンの有効期限設定
     config.jwt_expiration_hours = 24
     config.jwt_refresh_expiration_days = 7

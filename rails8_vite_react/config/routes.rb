@@ -14,6 +14,9 @@ Rails.application.routes.draw do
           get :search
         end
       end
+
+      # 権限管理（新規追加）
+      resources :permissions, only: [:index, :create, :update, :destroy]
       
       # 認証専用
       post   '/auth/login',      to: 'auth#login'
@@ -22,6 +25,13 @@ Rails.application.routes.draw do
       get    '/auth/me',         to: 'auth#me'
       delete '/auth/logout_all', to: 'auth#logout_all'
       get    '/auth/sessions',   to: 'auth#sessions'
+
+      # セッション管理
+      resources :sessions, only: [:index, :show, :destroy] do
+        member do
+          delete :terminate
+        end
+      end
 
       # User app management
       resource :user_app, only: [:show] do

@@ -1,0 +1,96 @@
+special_permissions:
+  system_administrator: 'system:admin'
+
+api_permissions:
+  # ユーザー管理API
+  'users':
+    GET: ['manager:read', 'admin:read']
+    POST: ['admin:write', 'manager:write']
+  'users/:id':
+    GET: ['profile:read', 'manager:read', 'admin:read']
+    PUT: ['profile:write', 'manager:write', 'admin:write']
+    PATCH: ['profile:write', 'manager:write', 'admin:write']
+    DELETE: ['admin:write']
+  'users/me':
+    GET: ['profile:read']
+  'users/search':
+    GET: ['manager:read', 'admin:read']
+  'users/:id/change_password':
+    PUT: ['profile:write']
+  'users/:id/sessions':
+    GET: ['profile:read', 'admin:read']
+
+  # 認証API
+  'auth/login':
+    POST: [] # 誰でもアクセス可能
+  'auth/refresh':
+    POST: [] # 誰でもアクセス可能
+  'auth/logout':
+    DELETE: ['profile:read']
+  'auth/logout_all':
+    DELETE: ['profile:write']
+  'auth/me':
+    GET: ['profile:read']
+  'auth/sessions':
+    GET: ['profile:read']
+
+  # 権限管理API（新規追加）
+  'permissions':
+    GET: ['admin:read']
+    POST: ['admin:write']
+  'permissions/:id':
+    PUT: ['admin:write']
+    PATCH: ['admin:write']
+    DELETE: ['admin:write']
+
+  # メンテナンス用API
+  'maintenance':
+    GET: ['maintenance:read', 'admin:read']
+    POST: ['maintenance:write', 'admin:write']
+  'maintenance/:id':
+    GET: ['maintenance:read', 'admin:read']
+    PUT: ['maintenance:write', 'admin:write']
+    PATCH: ['maintenance:write', 'admin:write']
+    DELETE: ['maintenance:write', 'admin:write']
+
+  # ユーザーアプリ管理API
+  'user_apps':
+    GET: ['apps:read', 'profile:read']
+    POST: ['apps:write', 'profile:write']
+  'user_apps/:id':
+    GET: ['apps:read', 'profile:read']
+    PUT: ['apps:write', 'profile:write']
+    PATCH: ['apps:write', 'profile:write']
+    DELETE: ['apps:write', 'profile:write']
+
+  # セッション管理API
+  'sessions':
+    GET: ['profile:read', 'admin:read']
+  'sessions/:id':
+    GET: ['profile:read', 'admin:read']
+    DELETE: ['profile:write', 'admin:write']
+  'sessions/:id/terminate':
+    DELETE: ['profile:write', 'admin:write']
+
+  # パブリックAPI（権限不要）
+  'public/status':
+    GET: []
+  'public/version':
+    GET: []
+
+# 権限の説明
+permissions:
+  system:admin: 'システム全体の管理権限'
+  admin:read: '管理者レベルの読み取り権限'
+  admin:write: '管理者レベルの書き込み権限'
+  manager:read: 'マネージャーレベルの読み取り権限'
+  manager:write: 'マネージャーレベルの書き込み権限'
+  profile:read: '自分のプロフィール読み取り権限'
+  profile:write: '自分のプロフィール編集権限'
+  users:read: 'ユーザー情報読み取り権限'
+  users:write: 'ユーザー情報編集権限'
+  users:admin: 'ユーザー管理権限'
+  maintenance:read: 'メンテナンス情報読み取り権限'
+  maintenance:write: 'メンテナンス操作権限'
+  apps:read: 'アプリケーション情報読み取り権限'
+  apps:write: 'アプリケーション操作権限'

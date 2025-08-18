@@ -1,5 +1,6 @@
 class Api::V1::AuthenticatedController < Api::V1::BaseController
   before_action :authenticate_user
+  attr_reader :current_user, :current_token
   
   private
   

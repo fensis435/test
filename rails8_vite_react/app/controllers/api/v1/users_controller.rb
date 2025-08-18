@@ -1,7 +1,7 @@
 class Api::V1::UsersController < Api::V1::AuthenticatedController
   before_action :set_user, only: [:show, :update, :destroy]
-  before_action :ensure_admin, only: [:index, :destroy]
-  before_action :ensure_owner_or_admin, only: [:show, :update]
+  #before_action :ensure_admin, only: [:index, :destroy]
+  #before_action :ensure_owner_or_admin, only: [:show, :update]
 
   # GET /api/v1/users
   # 管理者のみアクセス可能
@@ -12,7 +12,7 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
                  .per(params[:per_page] || 20)
 
     render json: {
-      users: @users,
+      users: @users.map{|user| user_with_permissions(user)},
       meta: {
         current_page: @users.current_page,
         per_page: @users.limit_value,
@@ -42,7 +42,7 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
   # 現在のユーザー情報を取得
   def me
     render json: {
-      user: {
+      user:{
         id: current_user.id,
         name: current_user.name,
         email: current_user.email,
@@ -78,6 +78,9 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
         
         @user.create_session(access_decoded[:jti], 'access', access_decoded[:exp], device_info)
         @user.create_session(refresh_decoded[:jti], 'refresh', refresh_decoded[:exp], device_info)
+
+        # 権限の設定
+        assign_permissions(@user, params[:permissions]) if params[:permissions]
 
         render json: {
           message: 'User created successfully',
@@ -196,7 +199,7 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
     ).select(:id, :name, :email, :created_at)
      .limit(20)
 
-    render json: { users: @users }, status: :ok
+    render json: { users: @users.map{|user| user_with_permissions(user)} }, status: :ok
   end
 
   # GET /api/v1/users/:id/sessions
@@ -219,13 +222,20 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
   private
 
   def set_user
-    @user = User.find(params[:id])
+    @user = params[:id] == 'me' ? current_user : User.find(params[:id])
   rescue ActiveRecord::RecordNotFound
     render json: { error: 'User not found' }, status: :not_found
   end
 
+  def check_user_access
+    # 自分自身のデータか、適切な権限を持っているかチェック
+    unless @user == current_user || current_user.has_any_permission?(['admin:read', 'manager:read'])
+      render json: { error: 'Access denied' }, status: :forbidden
+    end
+  end
+
   def user_params
-    params.require(:user).permit(:name, :email, :password, :password_confirmation)
+    params.require(:user).permit(:name, :email, :password, :password_confirmation, :role, :k8s_namespace, :k8s_release_name, :app_url, :app_status)
   end
 
   def user_update_params
@@ -267,6 +277,25 @@ class Api::V1::UsersController < Api::V1::AuthenticatedController
       ip_address: ip_address,
       created_at: Time.current
     }.to_json
+  end
+
+  def user_with_permissions(user)
+    user.as_json.merge(
+      permissions: user.permissions.pluck(:name),
+      roles: user.permissions.map(&:role).uniq
+    )
+  end
+
+  def assign_permissions(user, permission_names)
+    permission_names.each do |name|
+      user.add_permission(name)
+    end
+  end
+
+  def update_permissions(user, permission_names)
+    # 既存権限を削除して新しい権限を設定
+    user.user_permissions.destroy_all
+    assign_permissions(user, permission_names)
   end
 
 end

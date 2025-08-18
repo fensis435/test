@@ -10,7 +10,17 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2025_08_14_060638) do
+ActiveRecord::Schema[8.0].define(version: 2025_08_17_225816) do
+  create_table "api_permissions", force: :cascade do |t|
+    t.string "controller", null: false
+    t.string "http_method", null: false
+    t.integer "permission_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["controller", "http_method"], name: "index_api_permissions_on_controller_and_http_method"
+    t.index ["permission_id"], name: "index_api_permissions_on_permission_id"
+  end
+
   create_table "blacklisted_tokens", force: :cascade do |t|
     t.string "jti", null: false
     t.integer "exp", null: false
@@ -22,6 +32,34 @@ ActiveRecord::Schema[8.0].define(version: 2025_08_14_060638) do
     t.index ["jti"], name: "index_blacklisted_tokens_on_jti", unique: true
     t.index ["user_id", "exp"], name: "index_blacklisted_tokens_on_user_id_and_exp"
     t.index ["user_id"], name: "index_blacklisted_tokens_on_user_id"
+  end
+
+  create_table "permissions", force: :cascade do |t|
+    t.string "name", null: false
+    t.text "description"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["name"], name: "index_permissions_on_name", unique: true
+  end
+
+  create_table "url_api_permissions", force: :cascade do |t|
+    t.string "url_pattern", null: false
+    t.string "http_method", null: false
+    t.integer "permission_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["permission_id"], name: "index_url_api_permissions_on_permission_id"
+    t.index ["url_pattern", "http_method", "permission_id"], name: "idx_on_url_pattern_http_method_permission_id_5a4b29701b"
+  end
+
+  create_table "user_permissions", force: :cascade do |t|
+    t.integer "user_id", null: false
+    t.integer "permission_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["permission_id"], name: "index_user_permissions_on_permission_id"
+    t.index ["user_id", "permission_id"], name: "index_user_permissions_on_user_id_and_permission_id", unique: true
+    t.index ["user_id"], name: "index_user_permissions_on_user_id"
   end
 
   create_table "user_sessions", force: :cascade do |t|
@@ -63,6 +101,10 @@ ActiveRecord::Schema[8.0].define(version: 2025_08_14_060638) do
     t.index ["role"], name: "index_users_on_role"
   end
 
+  add_foreign_key "api_permissions", "permissions"
   add_foreign_key "blacklisted_tokens", "users"
+  add_foreign_key "url_api_permissions", "permissions"
+  add_foreign_key "user_permissions", "permissions"
+  add_foreign_key "user_permissions", "users"
   add_foreign_key "user_sessions", "users"
 end
