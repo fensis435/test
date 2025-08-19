@@ -1,4 +1,5 @@
-Rails 8.0のapp/services配下に配置するKubernetes client libraryを使った包括的な便利操作関数群を作成しました。以下のようにカテゴリーごとにファイルを分けて整理しています：
+Rails 8.0のapp/services配下に配置するKubernetes client libraryを使った包括的な便利操作関数群です。
+以下のようにカテゴリーごとにファイルを分けて整理しています：
 
 ## 📁 ファイル構成
 
