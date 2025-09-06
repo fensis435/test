@@ -1,0 +1,20 @@
+{
+  "tags": [
+    {
+      "id": "fruit",
+      "label": "果物",
+      "children": [
+        { "id": "apple",   "label": "りんご" },
+        { "id": "banana",  "label": "バナナ" }
+      ]
+    },
+    {
+      "id": "veg",
+      "label": "野菜",
+      "children": [
+        { "id": "carrot",  "label": "にんじん" },
+        { "id": "spinach", "label": "ほうれん草" }
+      ]
+    }
+  ]
+}
