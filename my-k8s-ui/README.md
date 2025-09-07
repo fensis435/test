@@ -262,7 +262,10 @@ export default function AppContainer() {
 ## 10. ライセンス  
 
 このコンポーネント群は MIT ライセンスのもとで公開されています。詳細は `LICENSE` ファイルをご覧ください。
-REST API ## 11. REST API 部分を Rails に置き換える方法
+
+---
+
+## 11. REST API 部分を Rails に置き換える方法
 
 フロントエンドの API 呼び出しを、Rails で構築したバックエンドに切り替えるには、以下の手順で進めます。
 
