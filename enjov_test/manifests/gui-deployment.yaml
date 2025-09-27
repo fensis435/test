@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gui-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gui
+  template:
+    metadata:
+      labels:
+        app: gui
+    spec:
+      containers:
+      - name: envoy
+        image: envoyproxy/envoy:v1.24.1
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: envoy-config
+          mountPath: /etc/envoy
+      - name: gui-app
+        image: gui-app:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+      volumes:
+      - name: envoy-config
+        configMap:
+          name: envoy-gui-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gui-service
+spec:
+  selector:
+    app: gui
+  ports:
+  - port: 80
+    targetPort: 8080
