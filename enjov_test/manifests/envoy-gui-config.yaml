@@ -24,6 +24,13 @@ data:
                 - name: backend
                   domains: ["*"]
                   routes:
+                  # 3) 通常の /subweb2/* も転送
+                  - match:
+                      safe_regex:
+                        regex: "^/subweb2($|/)"
+                    route:
+                      cluster: subweb2_service
+                      idle_timeout: 3600s
                   # 1) WebSocket (Socket.IO) のパスをそのまま転送
                   - match: { prefix: "/subweb/socket.io" }
                     route: 
@@ -67,6 +74,21 @@ data:
                 address:
                   socket_address:
                     address: subweb-service.default.svc.cluster.local. 
+                    port_value: 80
+
+      - name: subweb2_service
+        connect_timeout: 0.5s
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        dns_lookup_family: V4_ONLY
+        load_assignment:
+          cluster_name: subweb2_service
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: subweb2-service.default.svc.cluster.local.
                     port_value: 80
 
     admin:
