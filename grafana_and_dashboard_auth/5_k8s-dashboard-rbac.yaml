@@ -1,0 +1,100 @@
+# ユーザーごとのServiceAccountとRBACを作成
+# これはRailsから動的に作成することも可能
+
+---
+# 管理者用のServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dashboard-admin-sa
+  namespace: kubernetes-dashboard
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dashboard-admin-sa
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: dashboard-admin-sa
+  namespace: kubernetes-dashboard
+
+---
+# 閲覧者用のServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dashboard-viewer-sa
+  namespace: kubernetes-dashboard
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dashboard-viewer
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets", "events", "namespaces"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dashboard-viewer-sa
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dashboard-viewer
+subjects:
+- kind: ServiceAccount
+  name: dashboard-viewer-sa
+  namespace: kubernetes-dashboard
+
+---
+# トークン用のSecret（K8s 1.24+の場合）
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dashboard-admin-sa-token
+  namespace: kubernetes-dashboard
+  annotations:
+    kubernetes.io/service-account.name: dashboard-admin-sa
+type: kubernetes.io/service-account-token
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dashboard-viewer-sa-token
+  namespace: kubernetes-dashboard
+  annotations:
+    kubernetes.io/service-account.name: dashboard-viewer-sa
+type: kubernetes.io/service-account-token
+
+---
+# Kubernetes Dashboard自体の設定
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubernetes-dashboard-settings
+  namespace: kubernetes-dashboard
+data:
+  settings.json: |
+    {
+      "clusterName": "Production Cluster",
+      "itemsPerPage": 50,
+      "logsAutoRefreshTimeInterval": 5,
+      "resourceAutoRefreshTimeInterval": 5,
+      "disableAccessDeniedNotifications": false
+    }
