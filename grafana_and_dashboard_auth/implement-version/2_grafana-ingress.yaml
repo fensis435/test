@@ -1,0 +1,71 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana-ingress
+  namespace: monitoring
+  annotations:
+    # 認証プロキシの設定
+    nginx.ingress.kubernetes.io/auth-url: "http://rails-service.default.svc.cluster.local/auth/verify"
+    nginx.ingress.kubernetes.io/auth-method: "GET"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups,X-Auth-Request-Role"
+    
+    # Cookieの転送設定
+    nginx.ingress.kubernetes.io/auth-snippet: |
+      proxy_set_header Cookie $http_cookie;
+    
+    # エラーページの設定（認証失敗時にRailsのログインページへリダイレクト）
+    nginx.ingress.kubernetes.io/auth-signin: "https://yourdomain.com/login?redirect=$escaped_request_uri"
+    
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: grafana.yourdomain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana
+            port:
+              number: 3000
+  tls:
+  - hosts:
+    - grafana.yourdomain.com
+    secretName: grafana-tls
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: k8s-dashboard-ingress
+  namespace: kubernetes-dashboard
+  annotations:
+    nginx.ingress.kubernetes.io/auth-url: "http://rails-service.default.svc.cluster.local/auth/verify"
+    nginx.ingress.kubernetes.io/auth-method: "GET"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User"
+    nginx.ingress.kubernetes.io/auth-snippet: |
+      proxy_set_header Cookie $http_cookie;
+    nginx.ingress.kubernetes.io/auth-signin: "https://yourdomain.com/login?redirect=$escaped_request_uri"
+    
+    # Kubernetes Dashboardは追加の設定が必要
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: k8s-dashboard.yourdomain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: kubernetes-dashboard
+            port:
+              number: 443
+  tls:
+  - hosts:
+    - k8s-dashboard.yourdomain.com
+    secretName: k8s-dashboard-tls

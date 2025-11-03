@@ -1,0 +1,128 @@
+# grafana-values.yaml
+# Helm install用のvaluesファイル
+
+# 認証設定
+grafana.ini:
+  server:
+    root_url: https://grafana.yourdomain.com
+  
+  auth:
+    disable_login_form: true
+    disable_signout_menu: false
+  
+  auth.proxy:
+    enabled: true
+    header_name: X-Auth-Request-User
+    header_property: username
+    auto_sign_up: true
+    sync_ttl: 60
+    whitelist: ""
+    headers: "Email:X-Auth-Request-Email Groups:X-Auth-Request-Groups Role:X-Auth-Request-Role"
+    enable_login_token: false
+  
+  users:
+    allow_sign_up: true
+    auto_assign_org: true
+    auto_assign_org_id: 1
+    auto_assign_org_role: Viewer
+  
+  auth.basic:
+    enabled: false
+  
+  auth.anonymous:
+    enabled: false
+
+# Ingress設定
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  annotations:
+    # 認証プロキシの設定
+    nginx.ingress.kubernetes.io/auth-url: "http://rails-service.default.svc.cluster.local/auth/verify"
+    nginx.ingress.kubernetes.io/auth-method: "GET"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups,X-Auth-Request-Role"
+    nginx.ingress.kubernetes.io/auth-snippet: |
+      proxy_set_header Cookie $http_cookie;
+    nginx.ingress.kubernetes.io/auth-signin: "https://yourdomain.com/login?redirect=$escaped_request_uri"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  
+  hosts:
+    - grafana.yourdomain.com
+  
+  path: /
+  
+  tls:
+    - secretName: grafana-tls
+      hosts:
+        - grafana.yourdomain.com
+
+# Persistence設定
+persistence:
+  enabled: true
+  type: pvc
+  size: 10Gi
+  storageClassName: standard
+
+# リソース設定
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+# Admin設定（初回セットアップ用）
+adminUser: admin
+adminPassword: changeme123  # デプロイ後に変更
+
+# 環境変数
+env:
+  GF_AUTH_PROXY_ENABLED: "true"
+  GF_AUTH_PROXY_HEADER_NAME: "X-Auth-Request-User"
+  GF_AUTH_PROXY_HEADER_PROPERTY: "username"
+  GF_AUTH_PROXY_AUTO_SIGN_UP: "true"
+
+# Datasources（オプション）
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus-server.monitoring.svc.cluster.local
+        access: proxy
+        isDefault: true
+
+# Dashboards（オプション）
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/default
+
+# Service設定
+service:
+  type: ClusterIP
+  port: 80
+
+# Replicas
+replicas: 1
+
+# Security Context
+securityContext:
+  runAsUser: 472
+  runAsGroup: 472
+  fsGroup: 472
+
+# Pod annotations
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "3000"

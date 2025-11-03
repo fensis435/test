@@ -1,0 +1,196 @@
+# k8s-dashboard-rbac.yaml
+# Kubernetes Dashboard用の追加RBAC設定
+# Helm installとは別に適用
+
+---
+# 管理者用のServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dashboard-admin-sa
+  namespace: kubernetes-dashboard
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dashboard-admin-sa
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: dashboard-admin-sa
+  namespace: kubernetes-dashboard
+
+---
+# 閲覧者用のServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dashboard-viewer-sa
+  namespace: kubernetes-dashboard
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dashboard-viewer
+rules:
+# Core resources
+- apiGroups: [""]
+  resources: 
+    - pods
+    - pods/log
+    - services
+    - configmaps
+    - secrets
+    - events
+    - namespaces
+    - nodes
+    - persistentvolumes
+    - persistentvolumeclaims
+  verbs: ["get", "list", "watch"]
+
+# Apps
+- apiGroups: ["apps"]
+  resources: 
+    - deployments
+    - replicasets
+    - statefulsets
+    - daemonsets
+  verbs: ["get", "list", "watch"]
+
+# Batch
+- apiGroups: ["batch"]
+  resources: 
+    - jobs
+    - cronjobs
+  verbs: ["get", "list", "watch"]
+
+# Networking
+- apiGroups: ["networking.k8s.io"]
+  resources:
+    - ingresses
+    - networkpolicies
+  verbs: ["get", "list", "watch"]
+
+# Storage
+- apiGroups: ["storage.k8s.io"]
+  resources:
+    - storageclasses
+  verbs: ["get", "list", "watch"]
+
+# Metrics
+- apiGroups: ["metrics.k8s.io"]
+  resources:
+    - pods
+    - nodes
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dashboard-viewer-sa
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dashboard-viewer
+subjects:
+- kind: ServiceAccount
+  name: dashboard-viewer-sa
+  namespace: kubernetes-dashboard
+
+---
+# エディター用のServiceAccount（オプション）
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dashboard-editor-sa
+  namespace: kubernetes-dashboard
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dashboard-editor
+rules:
+# Viewerの権限 + 編集権限
+- apiGroups: [""]
+  resources: 
+    - pods
+    - services
+    - configmaps
+    - secrets
+    - events
+    - namespaces
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+- apiGroups: ["apps"]
+  resources: 
+    - deployments
+    - replicasets
+    - statefulsets
+    - daemonsets
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+- apiGroups: ["batch"]
+  resources: 
+    - jobs
+    - cronjobs
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# ノードやPVは読み取りのみ
+- apiGroups: [""]
+  resources:
+    - nodes
+    - persistentvolumes
+    - persistentvolumeclaims
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dashboard-editor-sa
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dashboard-editor
+subjects:
+- kind: ServiceAccount
+  name: dashboard-editor-sa
+  namespace: kubernetes-dashboard
+
+---
+# トークン用のSecret（K8s 1.24+の場合）
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dashboard-admin-sa-token
+  namespace: kubernetes-dashboard
+  annotations:
+    kubernetes.io/service-account.name: dashboard-admin-sa
+type: kubernetes.io/service-account-token
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dashboard-viewer-sa-token
+  namespace: kubernetes-dashboard
+  annotations:
+    kubernetes.io/service-account.name: dashboard-viewer-sa
+type: kubernetes.io/service-account-token
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dashboard-editor-sa-token
+  namespace: kubernetes-dashboard
+  annotations:
+    kubernetes.io/service-account.name: dashboard-editor-sa
+type: kubernetes.io/service-account-token

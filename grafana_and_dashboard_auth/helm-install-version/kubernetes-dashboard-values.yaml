@@ -1,0 +1,131 @@
+# kubernetes-dashboard-values.yaml
+# Helm install用のvaluesファイル
+
+# Ingress設定
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    # 認証プロキシの設定
+    nginx.ingress.kubernetes.io/auth-url: "http://rails-service.default.svc.cluster.local/auth/verify"
+    nginx.ingress.kubernetes.io/auth-method: "GET"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email"
+    nginx.ingress.kubernetes.io/auth-snippet: |
+      proxy_set_header Cookie $http_cookie;
+    nginx.ingress.kubernetes.io/auth-signin: "https://yourdomain.com/login?redirect=$escaped_request_uri"
+    
+    # HTTPS設定
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    
+    # 証明書
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  
+  hosts:
+    - k8s-dashboard.yourdomain.com
+  
+  tls:
+    - secretName: kubernetes-dashboard-tls
+      hosts:
+        - k8s-dashboard.yourdomain.com
+
+# Service設定
+service:
+  type: ClusterIP
+  externalPort: 443
+
+# RBAC設定
+rbac:
+  create: true
+  clusterReadOnlyRole: true
+
+# ServiceAccount設定
+serviceAccount:
+  create: true
+  name: kubernetes-dashboard
+
+# Settings
+settings:
+  # ピン留めされたCRD
+  pinnedCRDs: []
+  
+  # グローバル設定
+  global:
+    # デフォルトの名前空間
+    defaultNamespace: "default"
+    # アイテム数/ページ
+    itemsPerPage: 10
+    # ラベルを表示
+    labelsLimit: 3
+    # ログの自動更新間隔（秒）
+    logsAutoRefreshTimeInterval: 5
+    # リソースの自動更新間隔（秒）
+    resourceAutoRefreshTimeInterval: 5
+    # アクセス拒否通知を無効化
+    disableAccessDeniedNotifications: false
+
+# メトリクススクレーパー
+metricsScraper:
+  enabled: true
+
+# リソース設定
+resources:
+  limits:
+    cpu: 100m
+    memory: 200Mi
+  requests:
+    cpu: 100m
+    memory: 200Mi
+
+# メトリクススクレーパーのリソース
+metrics-scraper:
+  resources:
+    limits:
+      cpu: 100m
+      memory: 100Mi
+    requests:
+      cpu: 100m
+      memory: 100Mi
+
+# セキュリティコンテキスト
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsUser: 1001
+  runAsGroup: 2001
+
+# Podのセキュリティコンテキスト
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+# Extra arguments
+extraArgs:
+  - --enable-skip-login
+  - --enable-insecure-login=false
+  - --system-banner="Production Kubernetes Cluster"
+  - --token-ttl=43200  # 12時間
+
+# 環境変数
+env: []
+
+# Nodeセレクター
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# PodのAnnotations
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8443"
+  prometheus.io/scheme: "https"
+
+# PodのLabels
+podLabels: {}
+
+# Replicas
+replicaCount: 1

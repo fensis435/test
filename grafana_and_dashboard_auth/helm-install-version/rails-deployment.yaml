@@ -1,0 +1,180 @@
+# rails-deployment.yaml
+# RailsアプリケーションのKubernetesデプロイメント設定
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rails-service-account
+  namespace: default
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rails-k8s-reader
+rules:
+# Secretの読み取り権限（ServiceAccountトークン用）
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+  resourceNames:
+    - dashboard-admin-sa-token
+    - dashboard-viewer-sa-token
+    - dashboard-editor-sa-token
+
+# ServiceAccountの読み取り権限
+- apiGroups: [""]
+  resources: ["serviceaccounts"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rails-k8s-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rails-k8s-reader
+subjects:
+- kind: ServiceAccount
+  name: rails-service-account
+  namespace: default
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rails-app
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rails-app
+  template:
+    metadata:
+      labels:
+        app: rails-app
+    spec:
+      serviceAccountName: rails-service-account
+      containers:
+      - name: rails
+        image: your-registry/rails-app:latest
+        ports:
+        - containerPort: 3000
+        env:
+        # Rails設定
+        - name: RAILS_ENV
+          value: "production"
+        - name: RAILS_LOG_TO_STDOUT
+          value: "true"
+        
+        # JWT設定
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: rails-secrets
+              key: jwt-secret
+        
+        # データベース設定
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: rails-secrets
+              key: database-url
+        
+        # Grafana設定
+        - name: GRAFANA_API_URL
+          value: "http://grafana.monitoring.svc.cluster.local:80"
+        - name: GRAFANA_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-admin-token
+              key: password
+        
+        # Kubernetes API設定
+        - name: K8S_API_URL
+          value: "https://kubernetes.default.svc"
+        
+        # ServiceAccountトークン（環境変数からも読めるように）
+        - name: K8S_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: k8s-sa-tokens
+              key: admin-token
+              optional: true
+        - name: K8S_EDITOR_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: k8s-sa-tokens
+              key: editor-token
+              optional: true
+        - name: K8S_VIEWER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: k8s-sa-tokens
+              key: viewer-token
+              optional: true
+        
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+          requests:
+            cpu: 500m
+            memory: 512Mi
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        
+        volumeMounts:
+        - name: service-account-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      
+      volumes:
+      - name: service-account-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rails-service
+  namespace: default
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 3000
+    protocol: TCP
+  selector:
+    app: rails-app
+
+---
+# Rails用のSecret（手動で作成する必要があります）
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rails-secrets
+  namespace: default
+type: Opaque
+stringData:
+  jwt-secret: "your-jwt-secret-here-change-this"
+  database-url: "postgresql://user:password@postgres:5432/dbname"

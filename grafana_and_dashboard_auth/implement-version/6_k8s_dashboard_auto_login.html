@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kubernetes Dashboard - Auto Login</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .container {
+            background: white;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            text-align: center;
+            max-width: 400px;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .error {
+            color: #e74c3c;
+            margin-top: 1rem;
+        }
+        .success {
+            color: #27ae60;
+            margin-top: 1rem;
+        }
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 1rem;
+        }
+        button:hover {
+            background: #5568d3;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Kubernetes Dashboard</h1>
+        <div id="status">
+            <div class="spinner"></div>
+            <p>認証情報を取得中...</p>
+        </div>
+        <div id="error" class="error" style="display: none;"></div>
+        <button id="retry" style="display: none;" onclick="fetchToken()">再試行</button>
+    </div>
+
+    <script>
+        const K8S_DASHBOARD_URL = 'https://k8s-dashboard.yourdomain.com';
+        const AUTH_API_URL = '/auth/k8s_token';
+
+        async function fetchToken() {
+            const statusEl = document.getElementById('status');
+            const errorEl = document.getElementById('error');
+            const retryBtn = document.getElementById('retry');
+            
+            statusEl.style.display = 'block';
+            errorEl.style.display = 'none';
+            retryBtn.style.display = 'none';
+
+            try {
+                const response = await fetch(AUTH_API_URL, {
+                    method: 'GET',
+                    credentials: 'include',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error('認証に失敗しました');
+                }
+
+                const data = await response.json();
+                
+                if (!data.token) {
+                    throw new Error('トークンの取得に失敗しました');
+                }
+
+                // トークンを取得したら自動的にDashboardにリダイレクト
+                statusEl.innerHTML = '<p class="success">認証成功！リダイレクト中...</p>';
+                
+                // トークンをlocalStorageに保存（Dashboardが読み取る）
+                // 注意: これはK8s Dashboard側でトークンを読み取る仕組みがある場合のみ動作
+                redirectToDashboard(data.token);
+                
+            } catch (error) {
+                console.error('Error:', error);
+                statusEl.style.display = 'none';
+                errorEl.textContent = error.message || '認証エラーが発生しました';
+                errorEl.style.display = 'block';
+                retryBtn.style.display = 'block';
+            }
+        }
+
+        function redirectToDashboard(token) {
+            // Method 1: URLパラメータでトークンを渡す（推奨しない - セキュリティ上の理由）
+            // window.location.href = `${K8S_DASHBOARD_URL}/#/login?token=${token}`;
+            
+            // Method 2: POSTリクエストでトークンを送信
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = `${K8S_DASHBOARD_URL}/api/v1/login`;
+            
+            const tokenInput = document.createElement('input');
+            tokenInput.type = 'hidden';
+            tokenInput.name = 'token';
+            tokenInput.value = token;
+            
+            form.appendChild(tokenInput);
+            document.body.appendChild(form);
+            form.submit();
+        }
+
+        // ページロード時に自動実行
+        window.addEventListener('load', fetchToken);
+    </script>
+</body>
+</html>
