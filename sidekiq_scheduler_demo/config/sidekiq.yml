@@ -1,0 +1,27 @@
+# config/sidekiq.yml
+---
+:concurrency: 5
+:timeout: 25
+:verbose: true
+:queues:
+  - default
+  - mailers
+  - [critical, 2]
+
+# sidekiq-schedulerの設定
+:scheduler:
+  :dynamic: true
+  :enabled: true
+  :listened_queues_only: false
+  # タイムゾーン設定（重要）
+  :timezone: 'Asia/Tokyo'
+  # 静的なスケジュール例（YAMLファイルに直接記述）
+  # :schedule:
+  #   daily_cleanup:
+  #     cron: '0 2 * * *'  # 毎日2:00 JST
+  #     class: DailyCleanupJob
+  #     queue: default
+
+# production環境での設定例
+production:
+  :concurrency: 10
