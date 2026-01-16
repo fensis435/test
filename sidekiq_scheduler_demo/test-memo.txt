@@ -1,0 +1,19 @@
+$ ./bin/rails console
+Loading development environment (Rails 8.1.2)
+sidekiq-scheduler-demo(dev):001* DynamicScheduleService.register(
+sidekiq-scheduler-demo(dev):002*   job_name: 'test_1',
+sidekiq-scheduler-demo(dev):003*   job_class: 'NotificationJob',
+sidekiq-scheduler-demo(dev):004*   scheduled_at: 2.minutes.from_now,
+sidekiq-scheduler-demo(dev):005*   args: [123, 'テストメッセージ']
+sidekiq-scheduler-demo(dev):006> )
+2026-01-16T09:29:03.081Z pid=10608 tid=6hs INFO: Sidekiq 7.3.9 connecting to Redis with options {size: 10, pool_name: "internal", url: "redis://localhost:6379/0"}
+=> {job_name: "test_1", job_class: "NotificationJob", scheduled_at: "2026-01-16 18:31:03 JST", status: "registered"}
+sidekiq-scheduler-demo(dev):007> DynamicScheduleService.list
+=>
+[{name: "test_1",
+  class: "NotificationJob",
+  at: "2026-01-16T18:31:03+09:00",
+  cron: nil,
+  queue: "default",
+  enabled: true}]
+sidekiq-scheduler-demo(dev):008>
