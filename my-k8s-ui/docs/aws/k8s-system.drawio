@@ -1,0 +1,180 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/28.1.2 Chrome/138.0.7204.243 Electron/37.4.0 Safari/537.36" version="28.1.2">
+  <diagram name="ページ1" id="Y_XtkBJw_xKD1aERXhDD">
+    <mxGraphModel dx="1320" dy="923" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-29" value="" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="270" y="40" width="530" height="470" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" parent="1" source="CoV08NHv3FIWXNbgcwHk-1" target="CoV08NHv3FIWXNbgcwHk-2" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="570" y="160" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-33" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" parent="1" source="CoV08NHv3FIWXNbgcwHk-1" target="CoV08NHv3FIWXNbgcwHk-31" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-1" value="GUIサーバ+Envoy&lt;div&gt;(Actor1専用)&lt;/div&gt;&lt;div&gt;(helm install gui)&lt;/div&gt;&lt;div&gt;unique namespace&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="480" y="100" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-2" value="APPサービス1&lt;div&gt;(helm install app)&lt;/div&gt;&lt;div&gt;unique namespace&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="670" y="100" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-3" value="ブラウザ" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="110" y="100" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-6" value="nginx-ingress" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="290" y="220" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-8" value="APPサービス2&lt;br&gt;(helm install app)&lt;div&gt;unique namespace&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="670" y="170" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-9" value="APPサービス3&lt;div&gt;(helm install app)&lt;/div&gt;&lt;div&gt;unique namespace&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="670" y="240" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" parent="1" source="CoV08NHv3FIWXNbgcwHk-10" target="CoV08NHv3FIWXNbgcwHk-3" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-10" value="Actor1" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;" parent="1" vertex="1">
+          <mxGeometry x="30" y="100" width="30" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-13" value="gui-actor1.example.com" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" parent="1" vertex="1">
+          <mxGeometry x="470" y="70" width="140" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" parent="1" source="CoV08NHv3FIWXNbgcwHk-3" target="CoV08NHv3FIWXNbgcwHk-6" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="210" y="150" as="sourcePoint" />
+            <mxPoint x="260" y="150" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-17" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" parent="1" source="CoV08NHv3FIWXNbgcwHk-6" target="CoV08NHv3FIWXNbgcwHk-1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="370" y="280" as="sourcePoint" />
+            <mxPoint x="430" y="415" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-21" value="GUIサーバ+Envoy&lt;div&gt;（Actor2専用)&lt;/div&gt;&lt;div&gt;(helm instlal gui)&lt;/div&gt;&lt;div&gt;uniqe namespace&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="480" y="330" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-22" value="gui-actor2.example.com" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" parent="1" vertex="1">
+          <mxGeometry x="470" y="300" width="140" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-23" value="ブラウザ" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="110" y="330" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-24" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" parent="1" source="CoV08NHv3FIWXNbgcwHk-25" target="CoV08NHv3FIWXNbgcwHk-23" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-25" value="Actor2" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;" parent="1" vertex="1">
+          <mxGeometry x="30" y="330" width="30" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-26" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" parent="1" source="CoV08NHv3FIWXNbgcwHk-35" target="CoV08NHv3FIWXNbgcwHk-6" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="280" y="190" as="sourcePoint" />
+            <mxPoint x="340" y="310" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-27" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="CoV08NHv3FIWXNbgcwHk-6" target="CoV08NHv3FIWXNbgcwHk-21" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="350" y="380" as="sourcePoint" />
+            <mxPoint x="410" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-28" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" parent="1" source="CoV08NHv3FIWXNbgcwHk-21" target="CoV08NHv3FIWXNbgcwHk-9" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="670" y="310" as="targetPoint" />
+            <mxPoint x="600" y="170" as="sourcePoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-30" value="Kubernetes Cluster" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" parent="1" vertex="1">
+          <mxGeometry x="480" y="20" width="140" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-31" value="user table&lt;div&gt;session table&lt;/div&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;" parent="1" vertex="1">
+          <mxGeometry x="495" y="205" width="90" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-32" value="JWT認証確認" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" parent="1" vertex="1">
+          <mxGeometry x="450" y="164" width="90" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-34" value="サブドメインで振り分け" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" parent="1" vertex="1">
+          <mxGeometry x="280" y="194" width="140" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-35" value="サービス制御サーバ&lt;div&gt;k8s controller&lt;/div&gt;&lt;div&gt;helm controller&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="290" y="365" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="CoV08NHv3FIWXNbgcwHk-36" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.989;exitY=0.628;exitDx=0;exitDy=0;exitPerimeter=0;" parent="1" source="CoV08NHv3FIWXNbgcwHk-35" target="CoV08NHv3FIWXNbgcwHk-31" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="430" y="403" />
+              <mxPoint x="430" y="300" />
+              <mxPoint x="540" y="300" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tP0QXi0H-_yBjjzguNK9-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" parent="1" source="CoV08NHv3FIWXNbgcwHk-23" target="CoV08NHv3FIWXNbgcwHk-35" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="290" y="380" as="sourcePoint" />
+            <mxPoint x="350" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tP0QXi0H-_yBjjzguNK9-2" value="JWT認証ログイン" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" parent="1" vertex="1">
+          <mxGeometry x="160" y="390" width="140" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="tP0QXi0H-_yBjjzguNK9-3" value="専用GUIサーバへリダイレクト" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" parent="1" vertex="1">
+          <mxGeometry x="250" y="310" width="100" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="tP0QXi0H-_yBjjzguNK9-4" value="セッションデータ管理&lt;div&gt;ユーザデータ管理&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" parent="1" vertex="1">
+          <mxGeometry x="400" y="410" width="150" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="tP0QXi0H-_yBjjzguNK9-5" value="REST-API" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" parent="1" vertex="1">
+          <mxGeometry x="200" y="440" width="60" height="10" as="geometry" />
+        </mxCell>
+        <mxCell id="tP0QXi0H-_yBjjzguNK9-8" value="REST-API&lt;div&gt;Reverse Proxy&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" parent="1" vertex="1">
+          <mxGeometry x="610" y="370" width="100" height="10" as="geometry" />
+        </mxCell>
+        <mxCell id="tj-UmBT3okXxwQYYZGSp-1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.75;entryDx=0;entryDy=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" edge="1" parent="1" source="CoV08NHv3FIWXNbgcwHk-1" target="tP0QXi0H-_yBjjzguNK9-9">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="670" y="215" as="targetPoint" />
+            <mxPoint x="600" y="130" as="sourcePoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tP0QXi0H-_yBjjzguNK9-9" value="REST-API&lt;div&gt;Reverse Proxy&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;" parent="1" vertex="1">
+          <mxGeometry x="585" y="100" width="100" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="tj-UmBT3okXxwQYYZGSp-2" value="&lt;div&gt;&lt;br&gt;&lt;/div&gt;Shared PV&lt;div&gt;(実態)&lt;/div&gt;" style="strokeWidth=2;html=1;shape=mxgraph.flowchart.database;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="300" y="435" width="90" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="tj-UmBT3okXxwQYYZGSp-4" value="&lt;div&gt;&lt;br&gt;&lt;/div&gt;Shared PV&lt;div&gt;(実態を参照)&lt;/div&gt;" style="strokeWidth=2;html=1;shape=mxgraph.flowchart.database;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="820" y="240" width="90" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="tj-UmBT3okXxwQYYZGSp-5" value="&lt;br&gt;&lt;div&gt;Shared PV&lt;div&gt;(実態を参照)&lt;/div&gt;&lt;/div&gt;" style="strokeWidth=2;html=1;shape=mxgraph.flowchart.database;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="820" y="170" width="90" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="tj-UmBT3okXxwQYYZGSp-6" value="&lt;br&gt;&lt;div&gt;Shared PV&lt;div&gt;(実態を参照)&lt;/div&gt;&lt;/div&gt;" style="strokeWidth=2;html=1;shape=mxgraph.flowchart.database;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="820" y="100" width="90" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="tj-UmBT3okXxwQYYZGSp-7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="CoV08NHv3FIWXNbgcwHk-9" target="tj-UmBT3okXxwQYYZGSp-4">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="830" y="310" as="targetPoint" />
+            <mxPoint x="760" y="400" as="sourcePoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tj-UmBT3okXxwQYYZGSp-8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="CoV08NHv3FIWXNbgcwHk-8" target="tj-UmBT3okXxwQYYZGSp-5">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="860" y="359.5" as="targetPoint" />
+            <mxPoint x="830" y="359.5" as="sourcePoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tj-UmBT3okXxwQYYZGSp-9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" edge="1" parent="1" source="CoV08NHv3FIWXNbgcwHk-2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="820" y="130" as="targetPoint" />
+            <mxPoint x="880" y="240" as="sourcePoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="tj-UmBT3okXxwQYYZGSp-10" value="1.GUIサーバ＋Envoyは、Actorがloginしたらunique namespaceにhelm installされる。&lt;div&gt;2.jwt+database(user table, session table)によってログインとセッションを制御する。&lt;/div&gt;&lt;div&gt;3.APPサービスは同じAPP PKGをhelm installでunique namepsaceにinstallする。&lt;/div&gt;&lt;div&gt;4.GUIサーバはREST-APIでAPPサービスを使用するが、APPサービス内部にWebサーバある場合を想定して、EnvoyでReverse Proxyを制御する。&lt;/div&gt;&lt;div&gt;5.GUIサーバはActorの指示により任意のAPPサービスに接続できる。&lt;/div&gt;&lt;div&gt;6.Shared PVはサービス制御サーバが自分のnamespaceで管理するPVだが、APPサービスをhelm installする際にPVのドライバの識別子で同じストレージを見るように指示して作成した仮想のPVを作成してAPPサービスに割り当てて、APPサービスは自分の管理するShared PVを読み書きする。しかし、APPサービスごとにフォルダが分離されて互いに独立して他は見ることができない。&lt;br&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;/div&gt;" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="1">
+          <mxGeometry x="290" y="580" width="860" height="100" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
