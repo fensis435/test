@@ -1,5 +1,5 @@
 # 「社内LAN」から「専用線」を通って「AWSの閉域ネットワーク」へ繋がる流れ
-```Mermaid
+```mermaid
 graph TD
     subgraph On_Premises [会社・オンプレミス環境]
         PC[開発者のPC]
@@ -79,7 +79,7 @@ graph TD
 <br/>
 
 # 企業のEKS通信イメージ
-```Mermaid
+```mermaid
 graph LR
     subgraph Company_Network [会社・社内LAN]
         Admin[開発者のPC]
@@ -276,7 +276,7 @@ graph TD
 
 
 # セキュリティ構成
-```Mermaid
+```mermaid
 graph TD
     subgraph Internet [インターネット]
         User((ユーザー))
@@ -522,7 +522,7 @@ EKSには **「クラスターセキュリティグループ」** という仕�
 具体的には、自分のSGのインバウンドルールに、ポート番号ではなく **「EKSクラスターSGのID」を指定して「全部許可」** と書きます。こうすれば、裏方のプログラムが何番ポートを使おうが、身内同士の通信として自動で通るようになります。
 
 
-```Mermaid
+```mermaid
 graph TD
     subgraph Control_Plane ["コントロールプレーン (AWS管理)"]
         API_Server["API Server<br/>Port: 443"]
@@ -651,7 +651,7 @@ service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
 `0.0.0.0/0` → **`vgw-xxxx` (Virtual Private Gateway)**
 > もしくは、特定の社内ネットワーク宛（例：172.16.0.0/12）だけをVGWへ向け、外への通信は一切させない設定にします。
 
-```Mermaid
+```mermaid
 graph TD
     %% ==========================================
     %% インターネット公開型
