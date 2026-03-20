@@ -1,0 +1,507 @@
+# =============================================================================
+# Kubernetes Manifests
+# ExternalSecret, ClusterSecretStore, NetworkPolicy, ServiceAccount, etc.
+# =============================================================================
+
+# ── Namespace ─────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app
+  labels:
+    kubernetes.io/metadata.name: app
+    environment: prod
+    managed-by: argocd
+
+# ── Service Account (for Pod Identity) ───────────────────────────────────────
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app-sa
+  namespace: app
+  labels:
+    app.kubernetes.io/name: app
+    app.kubernetes.io/managed-by: argocd
+  # NOTE: No annotations needed for Pod Identity (unlike IRSA)
+automountServiceAccountToken: true
+
+# ── ClusterSecretStore (AWS Secrets Manager via Pod Identity) ─────────────────
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: aws-secretsmanager
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: ap-northeast-1   # Replaced by deploy script
+      auth:
+        jwt:
+          serviceAccountRef:
+            name: app-sa
+            namespace: app
+
+# ── ExternalSecret - DB Credentials ──────────────────────────────────────────
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: db-credentials
+  namespace: app
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  target:
+    name: db-credentials
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      data:
+        DB_HOST: "{{ .host }}"
+        DB_PORT: "{{ .port }}"
+        DB_NAME: "{{ .dbname }}"
+        DB_USERNAME: "{{ .username }}"
+        DB_PASSWORD: "{{ .password }}"
+        DATABASE_URL: "postgresql://{{ .username }}:{{ .password }}@{{ .host }}:{{ .port }}/{{ .dbname }}?sslmode=require"
+  data:
+    - secretKey: host
+      remoteRef:
+        key: eks-project/prod/rds/master-credentials   # Replaced by deploy
+        property: host
+    - secretKey: port
+      remoteRef:
+        key: eks-project/prod/rds/master-credentials
+        property: port
+    - secretKey: dbname
+      remoteRef:
+        key: eks-project/prod/rds/master-credentials
+        property: dbname
+    - secretKey: username
+      remoteRef:
+        key: eks-project/prod/rds/master-credentials
+        property: username
+    - secretKey: password
+      remoteRef:
+        key: eks-project/prod/rds/master-credentials
+        property: password
+
+# ── ExternalSecret - Cognito Config ──────────────────────────────────────────
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: cognito-config
+  namespace: app
+spec:
+  refreshInterval: 24h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  target:
+    name: cognito-config
+    creationPolicy: Owner
+  data:
+    - secretKey: COGNITO_USER_POOL_ID
+      remoteRef:
+        key: eks-project/prod/cognito/config
+        property: user_pool_id
+    - secretKey: COGNITO_CLIENT_ID
+      remoteRef:
+        key: eks-project/prod/cognito/config
+        property: client_id
+    - secretKey: COGNITO_CLIENT_SECRET
+      remoteRef:
+        key: eks-project/prod/cognito/config
+        property: client_secret
+
+# ── PersistentVolumeClaim - EBS (gp3, per-pod) ───────────────────────────────
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-local-data
+  namespace: app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ebs-gp3-encrypted
+  resources:
+    requests:
+      storage: 20Gi
+  volumeMode: Filesystem
+
+# ── PersistentVolumeClaim - EFS (shared across pods) ─────────────────────────
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-shared-data
+  namespace: app
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 50Gi
+  volumeMode: Filesystem
+
+# ── Deployment ────────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: app
+  labels:
+    app.kubernetes.io/name: app
+    app.kubernetes.io/version: latest
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: app
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: app
+      annotations:
+        kubectl.kubernetes.io/restartedAt: "placeholder"
+    spec:
+      serviceAccountName: app-sa
+      automountServiceAccountToken: true    # Required for Pod Identity
+      terminationGracePeriodSeconds: 60
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: app
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: app
+
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 70
+              preference:
+                matchExpressions:
+                  - key: karpenter.sh/capacity-type
+                    operator: In
+                    values: [on-demand]
+
+      initContainers:
+        # DB migration container
+        - name: db-migrate
+          image: "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/app:latest"
+          command: ["sh", "-c", "npm run migrate || npx prisma migrate deploy"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          envFrom:
+            - secretRef:
+                name: db-credentials
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+      containers:
+        - name: app
+          image: "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/app:latest"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+          # DB credentials from ExternalSecret
+          envFrom:
+            - secretRef:
+                name: db-credentials
+            - secretRef:
+                name: cognito-config
+            - configMapRef:
+                name: cluster-config
+
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              value: info
+            # Pod metadata
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+
+          volumeMounts:
+            - name: local-data        # EBS - ReadWriteOnce
+              mountPath: /data/local
+            - name: shared-data       # EFS - ReadWriteMany
+              mountPath: /data/shared
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /app/.cache
+
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+
+          startupProbe:
+            httpGet:
+              path: /health/startup
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+
+      volumes:
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: app-local-data
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: app-shared-data
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+
+# ── HorizontalPodAutoscaler ───────────────────────────────────────────────────
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: app
+  namespace: app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: app
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+      selectPolicy: Max
+
+# ── PodDisruptionBudget ───────────────────────────────────────────────────────
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: app
+  namespace: app
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: app
+
+# ── NetworkPolicy ─────────────────────────────────────────────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-network-policy
+  namespace: app
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: app
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow from ALB controller namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aws-load-balancer
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Allow within same namespace (pod-to-pod)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: app
+  egress:
+    # Allow DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow HTTPS to AWS services (Cognito, Secrets Manager, etc.)
+    - ports:
+        - protocol: TCP
+          port: 443
+    # Allow PostgreSQL
+    - ports:
+        - protocol: TCP
+          port: 5432
+    # Allow NFS (EFS)
+    - ports:
+        - protocol: TCP
+          port: 2049
+
+# ── Service ───────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+  namespace: app
+  labels:
+    app.kubernetes.io/name: app
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+
+# ── Ingress (ALB + WAF + Cognito) ─────────────────────────────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app
+  namespace: app
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/certificate-arn: CERT_ARN_PLACEHOLDER
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/wafv2-acl-arn: WAF_ARN_PLACEHOLDER
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/success-codes: "200-299"
+    alb.ingress.kubernetes.io/target-group-attributes: >
+      stickiness.enabled=true,
+      stickiness.lb_cookie.duration_seconds=86400,
+      deregistration_delay.timeout_seconds=30
+    # Cognito authentication on ALB
+    alb.ingress.kubernetes.io/auth-type: cognito
+    alb.ingress.kubernetes.io/auth-idp-cognito: >
+      {"UserPoolArn":"COGNITO_ARN_PLACEHOLDER",
+       "UserPoolClientId":"COGNITO_CLIENT_ID_PLACEHOLDER",
+       "UserPoolDomain":"COGNITO_DOMAIN_PLACEHOLDER"}
+    alb.ingress.kubernetes.io/auth-on-unauthenticated-request: authenticate
+    alb.ingress.kubernetes.io/auth-session-cookie: AWSELBAuthSessionCookie
+    alb.ingress.kubernetes.io/auth-session-timeout: "3600"
+spec:
+  ingressClassName: alb
+  rules:
+    - host: DOMAIN_PLACEHOLDER
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: app
+                port:
+                  number: 80

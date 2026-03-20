@@ -1,0 +1,237 @@
+{{/* ==========================================================================
+  rails-app/templates/deployment.yaml
+  Rails App server — per-project namespace.
+  Identical pattern to rails-gui but:
+    - namespace: app-{project-id}
+    - larger resources
+    - leader lease name differs
+  ========================================================================== */}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rails-app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-app.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "rails-app.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "rails-app.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/cert: {{ include (print $.Template.BasePath "/misc.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "rails-app.serviceAccountName" . }}
+      automountServiceAccountToken: true
+
+      initContainers:
+        - name: wait-for-db
+          image: postgres:16-alpine
+          command: ['sh', '-c', 'until pg_isready -h $DB_HOST -p 5432; do echo waiting; sleep 2; done']
+          env:
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: DB_HOST
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 70
+
+      containers:
+        # ── Main Rails App container ────────────────────────────────────────
+        - name: rails
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: [ALL]
+
+          env:
+            - name: RAILS_ENV
+              value: production
+            - name: RAILS_SERVE_STATIC_FILES
+              value: "true"
+            - name: RAILS_LOG_TO_STDOUT
+              value: "true"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Leader election (app pods use separate lease)
+            - name: LEADER_ELECTION_ENABLED
+              value: "true"
+            - name: LEADER_LEASE_NAME
+              value: "rails-app-leader"
+            # Project context
+            - name: PROJECT_ID
+              value: {{ .Values.project.id | quote }}
+            - name: PROJECT_NAME
+              value: {{ .Values.project.name | quote }}
+            # Cognito (JWT verification — groups are label-only)
+            - name: COGNITO_USER_POOL_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: cluster-config
+                  key: COGNITO_USER_POOL_ID
+            - name: COGNITO_CLIENT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: cluster-config
+                  key: COGNITO_CLIENT_ID
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: cluster-config
+                  key: AWS_REGION
+            # SQS — app pods also consume Cognito events (project-scoped)
+            - name: COGNITO_SQS_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: cluster-config
+                  key: COGNITO_SQS_QUEUE_URL
+            # ArgoCD bridge
+            - name: ARGOCD_SERVER
+              value: "argocd-server.argocd.svc.cluster.local:443"
+            - name: ARGOCD_INSECURE
+              value: "true"
+            # rsync SSH cert paths
+            - name: SSH_HOST_KEY_PATH
+              value: /etc/ssh-certs/tls.key
+            - name: SSH_HOST_CERT_PATH
+              value: /etc/ssh-certs/tls.crt
+
+          envFrom:
+            - secretRef:
+                name: db-credentials
+            - secretRef:
+                name: cognito-config
+            - secretRef:
+                name: argocd-api-token
+                optional: true
+
+          volumeMounts:
+            - name: efs-data
+              mountPath: /data
+            - name: ssh-certs
+              mountPath: /etc/ssh-certs
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: rails-tmp
+              mountPath: /app/tmp
+
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+
+          livenessProbe:
+            httpGet: { path: /health/live, port: 3000 }
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet: { path: /health/ready, port: 3000 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+
+        # ── rsync SSH sidecar ───────────────────────────────────────────────
+        - name: rsync-sshd
+          image: "{{ .Values.sshSidecar.image.repository }}:{{ .Values.sshSidecar.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: ssh
+              containerPort: 2222
+              protocol: TCP
+          command:
+            - /usr/sbin/sshd
+            - -D
+            - -p 2222
+            - -e
+            - -o HostKey=/etc/ssh-certs/tls.key
+            - -o AuthorizedKeysFile=/etc/authorized-keys/authorized_keys
+            - -o PasswordAuthentication=no
+            - -o PubkeyAuthentication=yes
+            - -o StrictModes=no
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 0
+            capabilities:
+              add: [NET_BIND_SERVICE]
+              drop: [ALL]
+          volumeMounts:
+            - name: efs-data
+              mountPath: /data
+            - name: ssh-certs
+              mountPath: /etc/ssh-certs
+              readOnly: true
+            - name: authorized-keys
+              mountPath: /etc/authorized-keys
+              readOnly: true
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+
+      volumes:
+        - name: efs-data
+          persistentVolumeClaim:
+            claimName: {{ include "rails-app.fullname" . }}-efs
+        - name: ssh-certs
+          secret:
+            secretName: {{ include "rails-app.fullname" . }}-ssh-cert
+            defaultMode: 0600
+        - name: authorized-keys
+          configMap:
+            name: {{ include "rails-app.fullname" . }}-authorized-keys
+            defaultMode: 0600
+        - name: tmp
+          emptyDir: {}
+        - name: rails-tmp
+          emptyDir: {}
+
+      # 2AZ spread — matches EFS multi-AZ availability
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "rails-app.selectorLabels" . | nindent 14 }}
+
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "rails-app.selectorLabels" . | nindent 18 }}
+              topologyKey: topology.kubernetes.io/zone

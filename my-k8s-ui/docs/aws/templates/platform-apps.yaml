@@ -1,0 +1,112 @@
+# =============================================================================
+# argocd/platform-apps.yaml
+# Platform-level ArgoCD Applications:
+#   - cert-manager (cluster-wide)
+#   - ClusterIssuer (self-signed for SSH, ACM for public HTTPS via ALB)
+#   - External Secrets Operator
+#   - CloudWatch Container Insights
+# =============================================================================
+
+# ── cert-manager ──────────────────────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.jetstack.io
+    chart: cert-manager
+    targetRevision: v1.16.2
+    helm:
+      values: |
+        installCRDs: true
+        replicaCount: 2
+        webhook:
+          replicaCount: 2
+        cainjector:
+          replicaCount: 2
+        global:
+          leaderElection:
+            namespace: cert-manager
+        podLabels:
+          app.kubernetes.io/part-of: platform
+        tolerations:
+          - key: CriticalAddonsOnly
+            operator: Exists
+            effect: NoSchedule
+        nodeSelector:
+          role: karpenter-system
+        # Use VPC endpoint for Route53 (private DNS validation for internal certs)
+        extraArgs:
+          - --dns01-recursive-nameservers-only=false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+# ── ClusterIssuers ────────────────────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cluster-issuers
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ARGOCD_REPO_URL_PLACEHOLDER
+    targetRevision: HEAD
+    path: platform/cluster-issuers
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # Must wait for cert-manager CRDs to be ready
+    syncOptions:
+      - CreateNamespace=true
+
+# ── External Secrets Operator ─────────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: external-secrets
+  namespace: argocd
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.external-secrets.io
+    chart: external-secrets
+    targetRevision: 0.10.4
+    helm:
+      values: |
+        replicaCount: 2
+        installCRDs: true
+        tolerations:
+          - key: CriticalAddonsOnly
+            operator: Exists
+            effect: NoSchedule
+        nodeSelector:
+          role: karpenter-system
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-secrets
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions:
+      - CreateNamespace=true

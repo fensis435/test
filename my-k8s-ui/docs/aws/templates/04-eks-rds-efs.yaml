@@ -1,0 +1,482 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EKS Infrastructure - EKS Cluster, EFS, RDS PostgreSQL'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eks-project
+  Environment:
+    Type: String
+    Default: prod
+  KubernetesVersion:
+    Type: String
+    Default: '1.31'
+  DBInstanceClass:
+    Type: String
+    Default: db.r8g.large
+  DBName:
+    Type: String
+    Default: appdb
+  DBUsername:
+    Type: String
+    Default: appuser
+  DBAllocatedStorage:
+    Type: Number
+    Default: 100
+  DBBackupRetentionDays:
+    Type: Number
+    Default: 14
+
+Resources:
+
+  # ============================================================
+  # EKS Cluster
+  # ============================================================
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}
+      Version: !Ref KubernetesVersion
+      RoleArn: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSClusterRoleArn
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-PublicSubnet1Id
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-PublicSubnet2Id
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-PublicSubnet3Id
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-EKSClusterSecurityGroupId
+        EndpointPublicAccess: false
+        EndpointPrivateAccess: true
+      KubernetesNetworkConfig:
+        ServiceCidr: 172.20.0.0/16
+        IpFamily: ipv4
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      EncryptionConfig:
+        - Provider:
+            KeyArn: !ImportValue
+              Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+          Resources:
+            - secrets
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}
+        - Key: karpenter.sh/discovery
+          Value: !Sub ${ProjectName}-${Environment}
+
+  # ============================================================
+  # EKS Add-ons
+  # ============================================================
+  VPCCNIAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: EKSCluster
+    Properties:
+      ClusterName: !Ref EKSCluster
+      AddonName: vpc-cni
+      ResolveConflicts: OVERWRITE
+      ConfigurationValues: '{"env":{"ENABLE_PREFIX_DELEGATION":"true","WARM_PREFIX_TARGET":"1"}}'
+
+  CoreDNSAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: VPCCNIAddon
+    Properties:
+      ClusterName: !Ref EKSCluster
+      AddonName: coredns
+      ResolveConflicts: OVERWRITE
+
+  KubeProxyAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: EKSCluster
+    Properties:
+      ClusterName: !Ref EKSCluster
+      AddonName: kube-proxy
+      ResolveConflicts: OVERWRITE
+
+  PodIdentityAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: EKSCluster
+    Properties:
+      ClusterName: !Ref EKSCluster
+      AddonName: eks-pod-identity-agent
+      ResolveConflicts: OVERWRITE
+
+  EBSCSIAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: PodIdentityAddon
+    Properties:
+      ClusterName: !Ref EKSCluster
+      AddonName: aws-ebs-csi-driver
+      ResolveConflicts: OVERWRITE
+      PodIdentityAssociations:
+        - RoleArn: !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-EBSCSIDriverRoleArn
+          ServiceAccount: ebs-csi-controller-sa
+          Namespace: kube-system
+
+  EFSCSIAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: PodIdentityAddon
+    Properties:
+      ClusterName: !Ref EKSCluster
+      AddonName: aws-efs-csi-driver
+      ResolveConflicts: OVERWRITE
+      PodIdentityAssociations:
+        - RoleArn: !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-EFSCSIDriverRoleArn
+          ServiceAccount: efs-csi-controller-sa
+          Namespace: kube-system
+
+  # ============================================================
+  # Karpenter System Node Group (bootstrap nodes for Karpenter itself)
+  # ============================================================
+  KarpenterNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    DependsOn:
+      - EKSCluster
+      - CoreDNSAddon
+    Properties:
+      ClusterName: !Ref EKSCluster
+      NodegroupName: !Sub ${ProjectName}-${Environment}-karpenter-system
+      NodeRole: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSNodeRoleArn
+      Subnets:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      InstanceTypes:
+        - m6i.large
+        - m6a.large
+      ScalingConfig:
+        MinSize: 2
+        MaxSize: 4
+        DesiredSize: 2
+      AmiType: AL2023_x86_64_STANDARD
+      DiskSize: 50
+      Labels:
+        role: karpenter-system
+        managed-by: nodegroup
+      Taints:
+        - Key: CriticalAddonsOnly
+          Effect: NO_SCHEDULE
+      UpdateConfig:
+        MaxUnavailablePercentage: 50
+      Tags:
+        Name: !Sub ${ProjectName}-${Environment}-karpenter-system
+
+  # ============================================================
+  # EFS File System
+  # ============================================================
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EFSKMSKeyArn
+      PerformanceMode: generalPurpose
+      ThroughputMode: elastic
+      FileSystemPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - elasticfilesystem:ClientMount
+              - elasticfilesystem:ClientWrite
+              - elasticfilesystem:ClientRootAccess
+            Condition:
+              Bool:
+                aws:SecureTransport: 'true'
+          - Effect: Deny
+            Principal:
+              AWS: '*'
+            Action: '*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+      BackupPolicy:
+        Status: ENABLED
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+        - TransitionToPrimaryStorageClass: AFTER_1_ACCESS
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-efs
+
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+      SecurityGroups:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-EFSSecurityGroupId
+
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+      SecurityGroups:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-EFSSecurityGroupId
+
+  EFSMountTarget3:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroups:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-EFSSecurityGroupId
+
+  # EFS Access Point for application
+  EFSAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser:
+        Uid: '1000'
+        Gid: '1000'
+      RootDirectory:
+        CreationInfo:
+          OwnerUid: '1000'
+          OwnerGid: '1000'
+          Permissions: '755'
+        Path: /app-data
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-efs-app-ap
+
+  # ============================================================
+  # RDS PostgreSQL
+  # ============================================================
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub ${ProjectName}-${Environment}-db-subnet-group
+      DBSubnetGroupDescription: Subnet group for RDS PostgreSQL
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-DBSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-DBSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-DBSubnet3Id
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-subnet-group
+
+  RDSParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      DBParameterGroupName: !Sub ${ProjectName}-${Environment}-pg-params
+      Description: PostgreSQL parameter group
+      Family: postgres16
+      Parameters:
+        log_connections: '1'
+        log_disconnections: '1'
+        log_duration: '0'
+        log_min_duration_statement: '1000'
+        log_statement: 'ddl'
+        shared_preload_libraries: 'pg_stat_statements'
+        pg_stat_statements.track: 'all'
+        ssl: '1'
+        password_encryption: 'scram-sha-256'
+        max_connections: '200'
+        work_mem: '16384'
+        maintenance_work_mem: '524288'
+        wal_level: 'logical'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-pg-params
+
+  # DB credentials are centrally managed in 06-observability.yaml (RDSMasterSecret).
+  # The RDS cluster resolves credentials from that cross-stack export.
+
+  RDSCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBClusterIdentifier: !Sub ${ProjectName}-${Environment}-postgres
+      Engine: aurora-postgresql
+      EngineVersion: '16.4'
+      DatabaseName: !Ref DBName
+      MasterUsername: !Sub
+        - '{{resolve:secretsmanager:${SecretArn}:SecretString:username}}'
+        - SecretArn: !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-RDSMasterSecretArn
+      MasterUserPassword: !Sub
+        - '{{resolve:secretsmanager:${SecretArn}:SecretString:password}}'
+        - SecretArn: !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-RDSMasterSecretArn
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      VpcSecurityGroupIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-RDSSecurityGroupId
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-RDSKMSKeyArn
+      StorageEncrypted: true
+      EnableIAMDatabaseAuthentication: true
+      BackupRetentionPeriod: !Ref DBBackupRetentionDays
+      PreferredBackupWindow: 17:00-18:00
+      PreferredMaintenanceWindow: Mon:18:00-Mon:19:00
+      DeletionProtection: true
+      EnableCloudwatchLogsExports:
+        - postgresql
+      DBClusterParameterGroupName: !Ref RDSClusterParameterGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-postgres
+
+  RDSClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      DBClusterParameterGroupName: !Sub ${ProjectName}-${Environment}-aurora-pg-cluster-params
+      Description: Aurora PostgreSQL cluster parameter group
+      Family: aurora-postgresql16
+      Parameters:
+        log_connections: '1'
+        log_disconnections: '1'
+        shared_preload_libraries: 'pg_stat_statements'
+        rds.force_ssl: '1'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-aurora-cluster-params
+
+  RDSWriterInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub ${ProjectName}-${Environment}-postgres-writer
+      DBClusterIdentifier: !Ref RDSCluster
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+      DBParameterGroupName: !Ref RDSParameterGroup
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RDSMonitoringRole.Arn
+      EnablePerformanceInsights: true
+      PerformanceInsightsKMSKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-RDSKMSKeyArn
+      PerformanceInsightsRetentionPeriod: 31
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-postgres-writer
+
+  RDSReaderInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub ${ProjectName}-${Environment}-postgres-reader
+      DBClusterIdentifier: !Ref RDSCluster
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+      DBParameterGroupName: !Ref RDSParameterGroup
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RDSMonitoringRole.Arn
+      EnablePerformanceInsights: true
+      PerformanceInsightsKMSKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-RDSKMSKeyArn
+      PerformanceInsightsRetentionPeriod: 31
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-postgres-reader
+
+  RDSMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-rds-monitoring-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+  # Update secret with endpoint info
+  DBSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-RDSMasterSecretArn
+      TargetId: !Ref RDSCluster
+      TargetType: AWS::RDS::DBCluster
+
+Outputs:
+  EKSClusterName:
+    Value: !Ref EKSCluster
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EKSClusterName
+
+  EKSClusterArn:
+    Value: !GetAtt EKSCluster.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EKSClusterArn
+
+  EKSClusterEndpoint:
+    Value: !GetAtt EKSCluster.Endpoint
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EKSClusterEndpoint
+
+  EFSFileSystemId:
+    Value: !Ref EFSFileSystem
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EFSFileSystemId
+
+  EFSAccessPointId:
+    Value: !Ref EFSAccessPoint
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EFSAccessPointId
+
+  RDSClusterEndpoint:
+    Value: !GetAtt RDSCluster.Endpoint.Address
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-RDSClusterEndpoint
+
+  RDSClusterReaderEndpoint:
+    Value: !GetAtt RDSCluster.ReadEndpoint.Address
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-RDSClusterReaderEndpoint
+
+  RDSClusterPort:
+    Value: !GetAtt RDSCluster.Endpoint.Port
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-RDSClusterPort
+
+  DBSecretArn:
+    Value: !ImportValue
+      Fn::Sub: ${ProjectName}-${Environment}-RDSMasterSecretArn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-DBSecretArn

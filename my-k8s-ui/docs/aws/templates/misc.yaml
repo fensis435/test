@@ -1,0 +1,231 @@
+{{/* ==========================================================================
+  rails-gui/templates/pvc.yaml — EFS PVC (ReadWriteMany, Multi-AZ safe)
+  ========================================================================== */}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "rails-gui.fullname" . }}-efs
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-gui.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  accessModes:
+    - ReadWriteMany          # EFS supports RWX — EBS does NOT
+  storageClassName: efs-sc   # defined in cluster 05-vpc-endpoints/deploy
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+  volumeMode: Filesystem
+
+{{/* ==========================================================================
+  rails-gui/templates/certificate.yaml
+  cert-manager Certificate — issues SSH host key pair per namespace.
+  Rails and rsync sidecar both mount the same Secret.
+  ArgoCD syncs this on chart install/upgrade — no manual key generation.
+  ========================================================================== */}}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "rails-gui.fullname" . }}-ssh-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-gui.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  secretName: {{ include "rails-gui.fullname" . }}-ssh-cert
+  # Self-signed issuer (cluster-wide) — for internal SSH only
+  issuerRef:
+    name: selfsigned-cluster-issuer
+    kind: ClusterIssuer
+  commonName: {{ include "rails-gui.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  dnsNames:
+    - {{ include "rails-gui.fullname" . }}
+    - {{ include "rails-gui.fullname" . }}.{{ .Release.Namespace }}
+    - {{ include "rails-gui.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  duration: 8760h      # 1 year
+  renewBefore: 720h    # renew 30 days before
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+
+{{/* ==========================================================================
+  rails-gui/templates/leader-election-rbac.yaml
+  RBAC for Kubernetes Lease-based leader election.
+  The leader pod runs scheduled jobs (SQS consumer, cron, etc.).
+  ========================================================================== */}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "rails-gui.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-gui.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "rails-gui.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+rules:
+  # Lease API for leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch"]
+  # ConfigMap fallback (older k8s)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["rails-gui-leader"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "rails-gui.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "rails-gui.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "rails-gui.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+
+{{/* ==========================================================================
+  rails-gui/templates/argocd-application.yaml
+  ArgoCD Application CRD installed in gui namespace.
+  Rails Job calls ArgoCD API (install/uninstall) → ArgoCD handles upgrade.
+  sync-wave: Rails Job (wave 3) → ArgoCD App created here (wave 2) → ArgoCD syncs.
+  ========================================================================== */}}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ include "rails-gui.fullname" . }}
+  namespace: argocd
+  labels:
+    {{- include "rails-gui.labels" . | nindent 4 }}
+    app.kubernetes.io/managed-by-rails: "true"
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    # ArgoCD will auto-upgrade when Helm repo is updated by CodeBuild
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: apps
+  source:
+    repoURL: {{ .Values.argocd.helmRepoUrl }}
+    chart: rails-gui
+    targetRevision: {{ .Values.argocd.chartVersion | default "*" }}
+    helm:
+      valueFiles:
+        - values.yaml
+      parameters:
+        - name: image.tag
+          value: {{ .Values.image.tag | quote }}
+        - name: namespace
+          value: {{ .Release.Namespace | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ .Release.Namespace }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false   # namespace already created by Rails Job
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas   # HPA manages replicas
+
+{{/* ==========================================================================
+  rails-gui/templates/service.yaml
+  ========================================================================== */}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rails-gui.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-gui.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "rails-gui.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+    - name: ssh
+      port: 2222
+      targetPort: 2222
+
+{{/* ==========================================================================
+  rails-gui/templates/hpa.yaml
+  ========================================================================== */}}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "rails-gui.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "rails-gui.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+
+{{/* ==========================================================================
+  rails-gui/templates/pdb.yaml — keep at least 1 pod alive during disruptions
+  ========================================================================== */}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "rails-gui.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "rails-gui.selectorLabels" . | nindent 6 }}

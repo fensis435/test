@@ -1,0 +1,846 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  EKS Infrastructure - CloudWatch & Secrets Manager
+  Log Groups, Container Insights, Metric Alarms, Dashboard,
+  SNS Alert Topic, Secrets Manager secrets + rotation
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eks-project
+  Environment:
+    Type: String
+    Default: prod
+  AlertEmail:
+    Type: String
+    Description: Email address to receive CloudWatch alarm notifications
+    Default: ''
+  DBName:
+    Type: String
+    Default: appdb
+  DBUsername:
+    Type: String
+    Default: appuser
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
+
+Resources:
+
+  # ============================================================
+  # SNS Topic for CloudWatch Alarms
+  # ============================================================
+  AlertSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-${Environment}-alerts
+      KmsMasterKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-alerts
+
+  AlertSNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AlertSNSTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertSNSTopic
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: sns:*
+            Resource: !Ref AlertSNSTopic
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertSNSTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ============================================================
+  # CloudWatch Log Groups
+  # ============================================================
+
+  # EKS Control Plane Logs
+  EKSControlPlaneLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/eks/${ProjectName}-${Environment}/cluster
+      RetentionInDays: 90
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-eks-controlplane-logs
+
+  # Container Insights - Application
+  AppContainerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/containerinsights/${ProjectName}-${Environment}/application
+      RetentionInDays: 30
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  # Container Insights - Performance
+  PerfContainerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/containerinsights/${ProjectName}-${Environment}/performance
+      RetentionInDays: 14
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  # Container Insights - Host
+  HostContainerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/containerinsights/${ProjectName}-${Environment}/host
+      RetentionInDays: 14
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  # Container Insights - Dataplane (kubelet / containerd)
+  DataplaneLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/containerinsights/${ProjectName}-${Environment}/dataplane
+      RetentionInDays: 14
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  # RDS Logs
+  RDSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/rds/cluster/${ProjectName}-${Environment}-postgres/postgresql
+      RetentionInDays: 30
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-RDSKMSKeyArn
+
+  # Application Log Group
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /eks/${ProjectName}-${Environment}/app
+      RetentionInDays: 30
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  # Karpenter Log Group
+  KarpenterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /eks/${ProjectName}-${Environment}/karpenter
+      RetentionInDays: 14
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  # ArgoCD Log Group
+  ArgoCDLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /eks/${ProjectName}-${Environment}/argocd
+      RetentionInDays: 30
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  # ============================================================
+  # CloudWatch Metric Alarms - NAT Gateway
+  # ============================================================
+
+  NATGateway1ErrorPortAllocationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-nat1-port-allocation-error
+      AlarmDescription: NAT Gateway 1 is failing to allocate ports - may be exhausted
+      Namespace: AWS/NATGateway
+      MetricName: ErrorPortAllocation
+      Dimensions:
+        - Name: NatGatewayId
+          Value: !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-NatGateway1Id
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+      OKActions:
+        - !Ref AlertSNSTopic
+
+  NATGateway2ErrorPortAllocationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-nat2-port-allocation-error
+      AlarmDescription: NAT Gateway 2 is failing to allocate ports
+      Namespace: AWS/NATGateway
+      MetricName: ErrorPortAllocation
+      Dimensions:
+        - Name: NatGatewayId
+          Value: !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-NatGateway2Id
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+
+  NATGateway3ErrorPortAllocationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-nat3-port-allocation-error
+      AlarmDescription: NAT Gateway 3 is failing to allocate ports
+      Namespace: AWS/NATGateway
+      MetricName: ErrorPortAllocation
+      Dimensions:
+        - Name: NatGatewayId
+          Value: !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-NatGateway3Id
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+
+  NATGateway1PacketsDropAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-nat1-packets-drop
+      AlarmDescription: NAT Gateway 1 dropping packets - possible bandwidth saturation
+      Namespace: AWS/NATGateway
+      MetricName: PacketsDropCount
+      Dimensions:
+        - Name: NatGatewayId
+          Value: !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-NatGateway1Id
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+
+  # ============================================================
+  # CloudWatch Metric Alarms - RDS Aurora PostgreSQL
+  # ============================================================
+
+  RDSCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-rds-high-cpu
+      AlarmDescription: RDS Aurora CPU utilization is high
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Sub ${ProjectName}-${Environment}-postgres
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+      OKActions:
+        - !Ref AlertSNSTopic
+
+  RDSConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-rds-high-connections
+      AlarmDescription: RDS Aurora connection count is high (>150 of 200 max)
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Sub ${ProjectName}-${Environment}-postgres
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 150
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+
+  RDSFreeableMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-rds-low-memory
+      AlarmDescription: RDS Aurora freeable memory is low (<512MB)
+      Namespace: AWS/RDS
+      MetricName: FreeableMemory
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Sub ${ProjectName}-${Environment}-postgres
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 536870912   # 512 MB in bytes
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+
+  RDSReplicaLagAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-rds-replica-lag
+      AlarmDescription: RDS Aurora replica lag is too high (>1 second)
+      Namespace: AWS/RDS
+      MetricName: AuroraReplicaLag
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Sub ${ProjectName}-${Environment}-postgres
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 1000   # milliseconds
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+
+  RDSDeadlocksAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-rds-deadlocks
+      AlarmDescription: RDS Aurora deadlocks detected
+      Namespace: AWS/RDS
+      MetricName: Deadlocks
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Sub ${ProjectName}-${Environment}-postgres
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+
+  # ============================================================
+  # CloudWatch Metric Alarms - ALB
+  # ============================================================
+
+  ALB5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-alb-5xx-errors
+      AlarmDescription: ALB 5xx error rate is elevated
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_5XX_Count
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+
+  ALBTargetResponseTimeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-alb-high-latency
+      AlarmDescription: ALB target response time exceeds 2 seconds
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Statistic: p99
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 2
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+
+  ALBUnhealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-alb-unhealthy-hosts
+      AlarmDescription: ALB has unhealthy target hosts
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+      OKActions:
+        - !Ref AlertSNSTopic
+
+  # ============================================================
+  # CloudWatch Dashboard
+  # ============================================================
+  MainDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${ProjectName}-${Environment}-overview
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0, "y": 0, "width": 24, "height": 1,
+              "properties": {
+                "markdown": "# ${ProjectName}-${Environment} Infrastructure Overview"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 1, "width": 8, "height": 6,
+              "properties": {
+                "title": "NAT Gateway - Bytes Out",
+                "view": "timeSeries",
+                "metrics": [
+                  ["AWS/NATGateway","BytesOutToDestination","NatGatewayId","${ProjectName}-${Environment}-nat-1"],
+                  ["AWS/NATGateway","BytesOutToDestination","NatGatewayId","${ProjectName}-${Environment}-nat-2"],
+                  ["AWS/NATGateway","BytesOutToDestination","NatGatewayId","${ProjectName}-${Environment}-nat-3"]
+                ],
+                "period": 60,
+                "stat": "Sum"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 1, "width": 8, "height": 6,
+              "properties": {
+                "title": "NAT Gateway - Port Allocation Errors",
+                "view": "timeSeries",
+                "metrics": [
+                  ["AWS/NATGateway","ErrorPortAllocation","NatGatewayId","${ProjectName}-${Environment}-nat-1",{"color":"#d62728"}],
+                  ["AWS/NATGateway","ErrorPortAllocation","NatGatewayId","${ProjectName}-${Environment}-nat-2",{"color":"#ff7f0e"}],
+                  ["AWS/NATGateway","ErrorPortAllocation","NatGatewayId","${ProjectName}-${Environment}-nat-3",{"color":"#9467bd"}]
+                ],
+                "period": 60,
+                "stat": "Sum"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 1, "width": 8, "height": 6,
+              "properties": {
+                "title": "RDS - CPU & Connections",
+                "view": "timeSeries",
+                "metrics": [
+                  ["AWS/RDS","CPUUtilization","DBClusterIdentifier","${ProjectName}-${Environment}-postgres",{"yAxis":"left","label":"CPU %"}],
+                  ["AWS/RDS","DatabaseConnections","DBClusterIdentifier","${ProjectName}-${Environment}-postgres",{"yAxis":"right","label":"Connections"}]
+                ],
+                "period": 60,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 7, "width": 8, "height": 6,
+              "properties": {
+                "title": "RDS - Freeable Memory",
+                "view": "timeSeries",
+                "metrics": [
+                  ["AWS/RDS","FreeableMemory","DBClusterIdentifier","${ProjectName}-${Environment}-postgres"]
+                ],
+                "period": 300,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 7, "width": 8, "height": 6,
+              "properties": {
+                "title": "RDS - Replica Lag",
+                "view": "timeSeries",
+                "metrics": [
+                  ["AWS/RDS","AuroraReplicaLag","DBClusterIdentifier","${ProjectName}-${Environment}-postgres"]
+                ],
+                "period": 60,
+                "stat": "Maximum"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 7, "width": 8, "height": 6,
+              "properties": {
+                "title": "ALB - Response Time & 5xx Errors",
+                "view": "timeSeries",
+                "metrics": [
+                  ["AWS/ApplicationELB","TargetResponseTime","",{"stat":"p99","label":"p99 latency","yAxis":"left"}],
+                  ["AWS/ApplicationELB","HTTPCode_ELB_5XX_Count","",{"stat":"Sum","label":"5xx errors","yAxis":"right","color":"#d62728"}]
+                ],
+                "period": 60
+              }
+            },
+            {
+              "type": "alarm",
+              "x": 0, "y": 13, "width": 24, "height": 4,
+              "properties": {
+                "title": "Active Alarms",
+                "alarms": [
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProjectName}-${Environment}-nat1-port-allocation-error",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProjectName}-${Environment}-rds-high-cpu",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProjectName}-${Environment}-rds-high-connections",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProjectName}-${Environment}-rds-low-memory",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProjectName}-${Environment}-alb-5xx-errors",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ProjectName}-${Environment}-alb-unhealthy-hosts"
+                ]
+              }
+            },
+            {
+              "type": "log",
+              "x": 0, "y": 17, "width": 12, "height": 6,
+              "properties": {
+                "title": "EKS Control Plane - Recent Errors",
+                "query": "SOURCE '/aws/eks/${ProjectName}-${Environment}/cluster' | fields @timestamp, @message | filter @message like /error|Error|ERROR/ | sort @timestamp desc | limit 50",
+                "region": "${AWS::Region}",
+                "view": "table"
+              }
+            },
+            {
+              "type": "log",
+              "x": 12, "y": 17, "width": 12, "height": 6,
+              "properties": {
+                "title": "Application - Recent Errors",
+                "query": "SOURCE '/eks/${ProjectName}-${Environment}/app' | fields @timestamp, @message | filter @message like /error|Error|ERROR|FATAL/ | sort @timestamp desc | limit 50",
+                "region": "${AWS::Region}",
+                "view": "table"
+              }
+            }
+          ]
+        }
+
+  # ============================================================
+  # Secrets Manager - All Secrets
+  # ============================================================
+
+  # KMS Key dedicated to Secrets Manager
+  SecretsKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for Secrets Manager secrets
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Sid: Allow Secrets Manager
+            Effect: Allow
+            Principal:
+              Service: secretsmanager.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+              - kms:CreateGrant
+            Resource: '*'
+          - Sid: Allow EKS Pods via Pod Identity
+            Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-secrets-kms-key
+
+  SecretsKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${ProjectName}-${Environment}-secrets
+      TargetKeyId: !Ref SecretsKMSKey
+
+  # Cognito Configuration Secret
+  CognitoConfigSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ProjectName}/${Environment}/cognito/config
+      Description: Cognito User Pool configuration for JWT verification
+      KmsKeyId: !Ref SecretsKMSKey
+      SecretString: !Sub |
+        {
+          "user_pool_id": "PLACEHOLDER_REPLACE_AFTER_DEPLOY",
+          "client_id": "PLACEHOLDER_REPLACE_AFTER_DEPLOY",
+          "client_secret": "PLACEHOLDER_REPLACE_AFTER_DEPLOY",
+          "region": "${AWS::Region}",
+          "jwt_issuer": "https://cognito-idp.${AWS::Region}.amazonaws.com/PLACEHOLDER"
+        }
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cognito-config
+        - Key: ManagedBy
+          Value: cloudformation
+
+  # ArgoCD Repository Credentials
+  ArgoCDRepoSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ProjectName}/${Environment}/argocd/repo-credentials
+      Description: ArgoCD Git repository credentials
+      KmsKeyId: !Ref SecretsKMSKey
+      SecretString: |
+        {
+          "url": "PLACEHOLDER_REPLACE_WITH_GIT_URL",
+          "username": "PLACEHOLDER",
+          "password": "PLACEHOLDER_REPLACE_WITH_TOKEN",
+          "type": "git"
+        }
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-argocd-repo
+
+  # ArgoCD Admin Password (populated by deploy script)
+  ArgoCDAdminSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ProjectName}/${Environment}/argocd/admin-password
+      Description: ArgoCD initial admin password
+      KmsKeyId: !Ref SecretsKMSKey
+      SecretString: |
+        {"password": "PLACEHOLDER_SET_BY_DEPLOY_SCRIPT"}
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-argocd-admin
+
+  # Application Secrets (JWT signing key, API keys, etc.)
+  AppSecretsGeneral:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ProjectName}/${Environment}/app/general
+      Description: General application secrets
+      KmsKeyId: !Ref SecretsKMSKey
+      GenerateSecretString:
+        SecretStringTemplate: |
+          {
+            "app_name": "PLACEHOLDER",
+            "environment": "prod"
+          }
+        GenerateStringKey: jwt_secret
+        PasswordLength: 64
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-app-general
+
+  # RDS Master Credentials (this replaces the one in 04-eks-rds-efs.yaml
+  # — kept here for centralised secret management; 04 stack references this ARN)
+  RDSMasterSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ProjectName}/${Environment}/rds/master-credentials
+      Description: RDS Aurora PostgreSQL master credentials
+      KmsKeyId: !Ref SecretsKMSKey
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${DBUsername}", "dbname": "${DBName}"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-rds-master
+
+  # ============================================================
+  # Secrets Manager - Automatic Rotation
+  # (Uses the AWS-managed Lambda for RDS Aurora PostgreSQL)
+  # ============================================================
+  RDSSecretRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    Properties:
+      SecretId: !Ref RDSMasterSecret
+      HostedRotationLambda:
+        RotationType: PostgreSQLSingleUser
+        RotationLambdaName: !Sub ${ProjectName}-${Environment}-rds-rotation
+        VpcSecurityGroupIds: !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-RDSSecurityGroupId
+        VpcSubnetIds: !Join
+          - ','
+          - - !ImportValue
+              Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+            - !ImportValue
+              Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+            - !ImportValue
+              Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      RotationRules:
+        AutomaticallyAfterDays: 30
+        Duration: 2h
+        ScheduleExpression: 'cron(0 2 1 * ? *)'   # 02:00 on the 1st of every month
+
+  # ============================================================
+  # CloudWatch Log Metric Filters & Alarms
+  # ============================================================
+
+  # Filter: 5xx errors in application logs
+  App5xxMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref ApplicationLogGroup
+      FilterName: !Sub ${ProjectName}-${Environment}-app-5xx
+      FilterPattern: '[timestamp, requestId, level="ERROR", ...]'
+      MetricTransformations:
+        - MetricName: App5xxErrors
+          MetricNamespace: !Sub ${ProjectName}/${Environment}
+          MetricValue: '1'
+          DefaultValue: 0
+          Unit: Count
+
+  App5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-app-5xx-errors
+      AlarmDescription: Application error rate (5xx) is high
+      Namespace: !Sub ${ProjectName}/${Environment}
+      MetricName: App5xxErrors
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 20
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+
+  # Filter: Karpenter failed node provisioning
+  KarpenterFailureMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref KarpenterLogGroup
+      FilterName: !Sub ${ProjectName}-${Environment}-karpenter-failures
+      FilterPattern: '{ $.level = "ERROR" }'
+      MetricTransformations:
+        - MetricName: KarpenterErrors
+          MetricNamespace: !Sub ${ProjectName}/${Environment}
+          MetricValue: '1'
+          DefaultValue: 0
+          Unit: Count
+
+  KarpenterFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-karpenter-errors
+      AlarmDescription: Karpenter is logging errors - node provisioning may be failing
+      Namespace: !Sub ${ProjectName}/${Environment}
+      MetricName: KarpenterErrors
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+
+  # ============================================================
+  # Container Insights IAM Role (for CloudWatch agent on EKS)
+  # ============================================================
+  ContainerInsightsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-container-insights-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: ContainerInsightsKMSPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !ImportValue
+                  Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-container-insights-role
+
+Outputs:
+  AlertSNSTopicArn:
+    Value: !Ref AlertSNSTopic
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-AlertSNSTopicArn
+
+  EKSControlPlaneLogGroupName:
+    Value: !Ref EKSControlPlaneLogGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EKSControlPlaneLogGroupName
+
+  ApplicationLogGroupName:
+    Value: !Ref ApplicationLogGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ApplicationLogGroupName
+
+  RDSMasterSecretArn:
+    Value: !Ref RDSMasterSecret
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-RDSMasterSecretArn
+
+  CognitoConfigSecretArn:
+    Value: !Ref CognitoConfigSecret
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-CognitoConfigSecretArn
+
+  ArgoCDRepoSecretArn:
+    Value: !Ref ArgoCDRepoSecret
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ArgoCDRepoSecretArn
+
+  AppSecretsArn:
+    Value: !Ref AppSecretsGeneral
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-AppSecretsArn
+
+  SecretsKMSKeyArn:
+    Value: !GetAtt SecretsKMSKey.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-SecretsKMSKeyArn
+
+  ContainerInsightsRoleArn:
+    Value: !GetAtt ContainerInsightsRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ContainerInsightsRoleArn
+
+  MainDashboardUrl:
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ProjectName}-${Environment}-overview
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-DashboardUrl

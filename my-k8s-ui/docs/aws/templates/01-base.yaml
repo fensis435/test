@@ -1,0 +1,718 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EKS Infrastructure - Base Layer: VPC, KMS, Cognito, Route53'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eks-project
+  Environment:
+    Type: String
+    AllowedValues: [dev, stg, prod]
+    Default: prod
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+  DomainName:
+    Type: String
+    Description: Route53 managed domain name (e.g. example.com)
+  HostedZoneId:
+    Type: String
+    Description: Existing Route53 Hosted Zone ID
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: {default: "Project"}
+        Parameters: [ProjectName, Environment]
+      - Label: {default: "Network"}
+        Parameters: [VpcCidr]
+      - Label: {default: "DNS"}
+        Parameters: [DomainName, HostedZoneId]
+
+Resources:
+
+  # ============================================================
+  # KMS Keys
+  # ============================================================
+  EKSSecretsKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for EKS Secrets encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Sid: Allow EKS Service
+            Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-eks-secrets-key
+
+  EKSSecretsKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${ProjectName}-${Environment}-eks-secrets
+      TargetKeyId: !Ref EKSSecretsKMSKey
+
+  RDSKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for RDS encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Sid: Allow RDS Service
+            Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-rds-key
+
+  RDSKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${ProjectName}-${Environment}-rds
+      TargetKeyId: !Ref RDSKMSKey
+
+  EBSKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for EBS encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Sid: Allow EC2/EBS Service
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+              - kms:CreateGrant
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-ebs-key
+
+  EBSKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${ProjectName}-${Environment}-ebs
+      TargetKeyId: !Ref EBSKMSKey
+
+  EFSKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for EFS encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Sid: Allow EFS Service
+            Effect: Allow
+            Principal:
+              Service: elasticfilesystem.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-efs-key
+
+  EFSKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${ProjectName}-${Environment}-efs
+      TargetKeyId: !Ref EFSKMSKey
+
+  # ============================================================
+  # VPC
+  # ============================================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets (ALB)
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-1
+        - Key: kubernetes.io/role/elb
+          Value: '1'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-2
+        - Key: kubernetes.io/role/elb
+          Value: '1'
+
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [2, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-3
+        - Key: kubernetes.io/role/elb
+          Value: '1'
+
+  # Private Subnets (EKS Nodes)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-1
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+        - Key: !Sub kubernetes.io/cluster/${ProjectName}-${Environment}
+          Value: owned
+        - Key: karpenter.sh/discovery
+          Value: !Sub ${ProjectName}-${Environment}
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-2
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+        - Key: !Sub kubernetes.io/cluster/${ProjectName}-${Environment}
+          Value: owned
+        - Key: karpenter.sh/discovery
+          Value: !Sub ${ProjectName}-${Environment}
+
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.12.0/24
+      AvailabilityZone: !Select [2, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-3
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+        - Key: !Sub kubernetes.io/cluster/${ProjectName}-${Environment}
+          Value: owned
+        - Key: karpenter.sh/discovery
+          Value: !Sub ${ProjectName}-${Environment}
+
+  # DB Subnets (RDS - isolated, no NAT)
+  DBSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.20.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-1
+
+  DBSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.21.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-2
+
+  DBSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.22.0/24
+      AvailabilityZone: !Select [2, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-3
+
+  # NAT Gateway
+  NatEIP1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatEIP2:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatEIP3:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-nat-1
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP2.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-nat-2
+
+  NatGateway3:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP3.AllocationId
+      SubnetId: !Ref PublicSubnet3
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-nat-3
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet3
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-rt-1
+
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-rt-2
+
+  PrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  PrivateRouteTable3:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-private-rt-3
+
+  PrivateRoute3:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway3
+
+  PrivateSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet3
+      RouteTableId: !Ref PrivateRouteTable3
+
+  DBRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-rt
+
+  DBSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DBSubnet1
+      RouteTableId: !Ref DBRouteTable
+
+  DBSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DBSubnet2
+      RouteTableId: !Ref DBRouteTable
+
+  DBSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DBSubnet3
+      RouteTableId: !Ref DBRouteTable
+
+  # ============================================================
+  # Cognito User Pool
+  # ============================================================
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${ProjectName}-${Environment}-user-pool
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      MfaConfiguration: OPTIONAL
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+      PasswordPolicy:
+        MinimumLength: 12
+        RequireUppercase: true
+        RequireLowercase: true
+        RequireNumbers: true
+        RequireSymbols: true
+        TemporaryPasswordValidityDays: 7
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: role
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+      UserPoolTags:
+        Project: !Ref ProjectName
+        Environment: !Ref Environment
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${ProjectName}-${Environment}-client
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      CallbackURLs:
+        - !Sub https://${DomainName}/auth/callback
+      LogoutURLs:
+        - !Sub https://${DomainName}/auth/logout
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      AllowedOAuthFlowsUserPoolClient: true
+      SupportedIdentityProviders:
+        - COGNITO
+
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub ${ProjectName}-${Environment}-auth
+      UserPoolId: !Ref CognitoUserPool
+
+  # ============================================================
+  # Route53 ACM Certificate
+  # ============================================================
+  ACMCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      SubjectAlternativeNames:
+        - !Sub '*.${DomainName}'
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cert
+
+Outputs:
+  VpcId:
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-VpcId
+
+  PublicSubnet1Id:
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-PublicSubnet1Id
+
+  PublicSubnet2Id:
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-PublicSubnet2Id
+
+  PublicSubnet3Id:
+    Value: !Ref PublicSubnet3
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-PublicSubnet3Id
+
+  PrivateSubnet1Id:
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-PrivateSubnet1Id
+
+  PrivateSubnet2Id:
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-PrivateSubnet2Id
+
+  PrivateSubnet3Id:
+    Value: !Ref PrivateSubnet3
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-PrivateSubnet3Id
+
+  DBSubnet1Id:
+    Value: !Ref DBSubnet1
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-DBSubnet1Id
+
+  DBSubnet2Id:
+    Value: !Ref DBSubnet2
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-DBSubnet2Id
+
+  DBSubnet3Id:
+    Value: !Ref DBSubnet3
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-DBSubnet3Id
+
+  EKSSecretsKMSKeyArn:
+    Value: !GetAtt EKSSecretsKMSKey.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  RDSKMSKeyArn:
+    Value: !GetAtt RDSKMSKey.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-RDSKMSKeyArn
+
+  EBSKMSKeyArn:
+    Value: !GetAtt EBSKMSKey.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EBSKMSKeyArn
+
+  EFSKMSKeyArn:
+    Value: !GetAtt EFSKMSKey.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EFSKMSKeyArn
+
+  CognitoUserPoolId:
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-CognitoUserPoolId
+
+  CognitoUserPoolArn:
+    Value: !GetAtt CognitoUserPool.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-CognitoUserPoolArn
+
+  CognitoUserPoolClientId:
+    Value: !Ref CognitoUserPoolClient
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-CognitoUserPoolClientId
+
+  ACMCertificateArn:
+    Value: !Ref ACMCertificate
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ACMCertificateArn
+
+  HostedZoneId:
+    Value: !Ref HostedZoneId
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-HostedZoneId
+
+  DomainName:
+    Value: !Ref DomainName
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-DomainName
+
+  # ── Route Table IDs (required by VPC Endpoint stack) ──────────────────────
+  PrivateRouteTable1Id:
+    Value: !Ref PrivateRouteTable1
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-PrivateRouteTable1Id
+
+  PrivateRouteTable2Id:
+    Value: !Ref PrivateRouteTable2
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-PrivateRouteTable2Id
+
+  PrivateRouteTable3Id:
+    Value: !Ref PrivateRouteTable3
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-PrivateRouteTable3Id
+
+  DBRouteTableId:
+    Value: !Ref DBRouteTable
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-DBRouteTableId
+
+  # ── NAT Gateway IDs (required by CloudWatch Alarms stack) ─────────────────
+  NatGateway1Id:
+    Value: !Ref NatGateway1
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-NatGateway1Id
+
+  NatGateway2Id:
+    Value: !Ref NatGateway2
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-NatGateway2Id
+
+  NatGateway3Id:
+    Value: !Ref NatGateway3
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-NatGateway3Id

@@ -1,0 +1,791 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cognito User Event Pipeline:
+  CloudTrail(Cognito API) → S3 → EventBridge → SQS → Rails polling
+  Groups are label-only (no IAM linkage).
+  Also: CodeBuild CI pipeline (GitHub → ECR + Helm package push).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eks-project
+  Environment:
+    Type: String
+    Default: prod
+  GitHubOwner:
+    Type: String
+    Description: GitHub organization or user name
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name (application source)
+  GitHubBranch:
+    Type: String
+    Default: main
+  GitHubHelmRepo:
+    Type: String
+    Description: GitHub repository name for Helm charts
+  ECRRepositoryName:
+    Type: String
+    Default: rails-app
+  GitHubConnectionArn:
+    Type: String
+    Description: >
+      AWS CodeStar Connections ARN for GitHub (create manually in console
+      under Developer Tools > Connections, then paste ARN here)
+
+Resources:
+
+  # ============================================================
+  # S3 Bucket for CloudTrail logs
+  # ============================================================
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub ${ProjectName}-${Environment}-cloudtrail-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !ImportValue
+                Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+            ExpirationInDays: 365
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cloudtrail
+
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${ProjectName}-${Environment}-cognito-trail
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceArn: !Sub arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${ProjectName}-${Environment}-cognito-trail
+          - Sid: DenyHTTP
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt CloudTrailBucket.Arn
+              - !Sub ${CloudTrailBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # ============================================================
+  # CloudTrail — Cognito API events only
+  # ============================================================
+  CognitoCloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: CloudTrailBucketPolicy
+    Properties:
+      TrailName: !Sub ${ProjectName}-${Environment}-cognito-trail
+      S3BucketName: !Ref CloudTrailBucket
+      IsLogging: true
+      IsMultiRegionTrail: false
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: true
+      CloudWatchLogsLogGroupArn: !GetAtt CognitoTrailLogGroup.Arn
+      CloudWatchLogsRoleArn: !GetAtt CloudTrailCWLogsRole.Arn
+      KMSKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      # Filter: Cognito write events only
+      EventSelectors:
+        - ReadWriteType: WriteOnly
+          IncludeManagementEvents: true
+          DataResources: []
+      AdvancedEventSelectors:
+        - Name: CognitoUserPoolEvents
+          FieldSelectors:
+            - Field: eventSource
+              Equals:
+                - cognito-idp.amazonaws.com
+            - Field: readOnly
+              Equals:
+                - 'false'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cognito-trail
+
+  CognitoTrailLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/cloudtrail/${ProjectName}-${Environment}/cognito
+      RetentionInDays: 30
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  CloudTrailCWLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-cloudtrail-cwlogs-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudTrailCWLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/cloudtrail/${ProjectName}-${Environment}/cognito:*
+
+  # ============================================================
+  # SQS Queue — Rails polls this for Cognito user events
+  # ============================================================
+  CognitoEventQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-${Environment}-cognito-user-events
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 86400      # 24h
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      KmsMasterKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CognitoEventDLQ.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cognito-user-events
+
+  CognitoEventDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-${Environment}-cognito-user-events-dlq
+      MessageRetentionPeriod: 1209600   # 14 days
+      KmsMasterKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cognito-events-dlq
+
+  CognitoEventQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref CognitoEventQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventBridge
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt CognitoEventQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt CognitoUserEventRule.Arn
+
+  # ============================================================
+  # EventBridge Rule — route Cognito events to SQS
+  # Targets: AdminCreateUser, AdminDeleteUser, AdminDisableUser,
+  #          AdminEnableUser, AdminAddUserToGroup, AdminRemoveUserFromGroup
+  # ============================================================
+  CognitoUserEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-cognito-user-events
+      Description: Routes Cognito user lifecycle events to Rails via SQS
+      EventPattern:
+        source:
+          - aws.cognito-idp
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - cognito-idp.amazonaws.com
+          eventName:
+            - AdminCreateUser
+            - AdminDeleteUser
+            - AdminDisableUser
+            - AdminEnableUser
+            - AdminUpdateUserAttributes
+            - AdminAddUserToGroup
+            - AdminRemoveUserFromGroup
+            - SignUp
+            - ConfirmSignUp
+            - DeleteUser
+          requestParameters:
+            userPoolId:
+              - !ImportValue
+                Fn::Sub: ${ProjectName}-${Environment}-CognitoUserPoolId
+      State: ENABLED
+      Targets:
+        - Id: CognitoEventSQS
+          Arn: !GetAtt CognitoEventQueue.Arn
+          # Transform: extract only the fields Rails needs
+          InputTransformer:
+            InputPathsMap:
+              eventName: "$.detail.eventName"
+              username: "$.detail.requestParameters.username"
+              userPoolId: "$.detail.requestParameters.userPoolId"
+              groupName: "$.detail.requestParameters.groupName"
+              eventTime: "$.detail.eventTime"
+              sourceIPAddress: "$.detail.sourceIPAddress"
+              errorCode: "$.detail.errorCode"
+              errorMessage: "$.detail.errorMessage"
+            InputTemplate: |
+              {
+                "event_name": "<eventName>",
+                "username": "<username>",
+                "user_pool_id": "<userPoolId>",
+                "group_name": "<groupName>",
+                "event_time": "<eventTime>",
+                "source_ip": "<sourceIPAddress>",
+                "error_code": "<errorCode>",
+                "error_message": "<errorMessage>"
+              }
+
+  # DLQ alarm
+  CognitoDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-cognito-events-dlq-not-empty
+      AlarmDescription: Messages in Cognito event DLQ — Rails may not be processing events
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt CognitoEventDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-AlertSNSTopicArn
+
+  # ============================================================
+  # Cognito Groups (label-only, no IAM role attached)
+  # ============================================================
+  CognitoGroupAdmin:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admin
+      Description: Platform administrators
+      UserPoolId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-CognitoUserPoolId
+      Precedence: 10
+
+  CognitoGroupDeveloper:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: developer
+      Description: Project developers
+      UserPoolId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-CognitoUserPoolId
+      Precedence: 20
+
+  CognitoGroupViewer:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: viewer
+      Description: Read-only viewers
+      UserPoolId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-CognitoUserPoolId
+      Precedence: 30
+
+  # ============================================================
+  # ECR Repository
+  # ============================================================
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ECRRepositoryName
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 20 tagged images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["v", "sha-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Expire untagged images after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-ecr
+
+  # GUI frontend ECR (React/Amplify build artifacts)
+  ECRFrontendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${ECRRepositoryName}-frontend
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 tagged images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["v", "sha-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Expire untagged images after 3 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 3
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # ============================================================
+  # CodeBuild — GitHub → ECR + Helm package push
+  # ============================================================
+  CodeBuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/codebuild/${ProjectName}-${Environment}-build
+      RetentionInDays: 30
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-codebuild-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # ECR push
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Resource:
+                  - !GetAtt ECRRepository.Arn
+                  - !GetAtt ECRFrontendRepository.Arn
+              # CloudWatch logs
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt CodeBuildLogGroup.Arn
+              # Secrets Manager (GitHub token)
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/${Environment}/github/*
+              # KMS decrypt
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !ImportValue
+                  Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+              # S3 for build cache
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                Resource: !Sub ${CodeBuildCacheBucket.Arn}/*
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt CodeBuildCacheBucket.Arn
+              # CodeStar Connections (GitHub webhook)
+              - Effect: Allow
+                Action:
+                  - codestar-connections:UseConnection
+                Resource: !Ref GitHubConnectionArn
+
+  CodeBuildCacheBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub ${ProjectName}-${Environment}-codebuild-cache-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !ImportValue
+                Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+            BucketKeyEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireCache
+            Status: Enabled
+            ExpirationInDays: 7
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # Secret for GitHub token (push Helm chart back to GitHub)
+  GitHubTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ProjectName}/${Environment}/github/token
+      Description: GitHub PAT for CodeBuild to push Helm packages
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      SecretString: |
+        {"github_token": "PLACEHOLDER_SET_MANUALLY", "github_user": "PLACEHOLDER"}
+
+  # CodeBuild Project — Rails app build
+  CodeBuildProjectApp:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-app-build
+      Description: Build Rails Docker image, push to ECR, package Helm chart and push to GitHub
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        Type: GITHUB
+        Location: !Sub https://github.com/${GitHubOwner}/${GitHubRepo}
+        BuildSpec: buildspec-app.yml
+        Auth:
+          Type: CODECONNECTIONS
+          Resource: !Ref GitHubConnectionArn
+      SourceVersion: !Ref GitHubBranch
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Cache:
+        Type: S3
+        Location: !Sub ${CodeBuildCacheBucket}/app-cache
+        Modes:
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_SOURCE_CACHE
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/standard:7.0
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        PrivilegedMode: true   # required for Docker build
+        EnvironmentVariables:
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: AWS_REGION
+            Value: !Ref AWS::Region
+          - Name: ECR_REPO_URI
+            Value: !GetAtt ECRRepository.RepositoryUri
+          - Name: ECR_FRONTEND_URI
+            Value: !GetAtt ECRFrontendRepository.RepositoryUri
+          - Name: HELM_REPO_OWNER
+            Value: !Ref GitHubOwner
+          - Name: HELM_REPO_NAME
+            Value: !Ref GitHubHelmRepo
+          - Name: GITHUB_SECRET_ARN
+            Value: !Ref GitHubTokenSecret
+          - Name: PROJECT_NAME
+            Value: !Ref ProjectName
+          - Name: ENVIRONMENT
+            Value: !Ref Environment
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref CodeBuildLogGroup
+      VpcConfig:
+        VpcId: !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-VpcId
+        Subnets:
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        SecurityGroupIds:
+          - !Ref CodeBuildSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-app-build
+
+  # CodeBuild Project — Frontend (React/Amplify) build
+  CodeBuildProjectFrontend:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-frontend-build
+      Description: Build React frontend Docker image and push to ECR
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        Type: GITHUB
+        Location: !Sub https://github.com/${GitHubOwner}/${GitHubRepo}
+        BuildSpec: buildspec-frontend.yml
+        Auth:
+          Type: CODECONNECTIONS
+          Resource: !Ref GitHubConnectionArn
+      SourceVersion: !Ref GitHubBranch
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Cache:
+        Type: S3
+        Location: !Sub ${CodeBuildCacheBucket}/frontend-cache
+        Modes:
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_SOURCE_CACHE
+      Environment:
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/standard:7.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: AWS_REGION
+            Value: !Ref AWS::Region
+          - Name: ECR_FRONTEND_URI
+            Value: !GetAtt ECRFrontendRepository.RepositoryUri
+          - Name: GITHUB_SECRET_ARN
+            Value: !Ref GitHubTokenSecret
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref CodeBuildLogGroup
+      VpcConfig:
+        VpcId: !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-VpcId
+        Subnets:
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        SecurityGroupIds:
+          - !Ref CodeBuildSecurityGroup
+
+  # SG for CodeBuild (needs outbound to ECR/S3/GitHub via VPC endpoints + NAT)
+  CodeBuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-codebuild-sg
+      GroupDescription: Security group for CodeBuild VPC
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound (NAT/VPC endpoints)
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-codebuild-sg
+
+  # ============================================================
+  # CodePipeline — GitHub commit → CodeBuild trigger
+  # ============================================================
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-codepipeline-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource:
+                  - !GetAtt CodeBuildProjectApp.Arn
+                  - !GetAtt CodeBuildProjectFrontend.Arn
+              - Effect: Allow
+                Action:
+                  - codestar-connections:UseConnection
+                Resource: !Ref GitHubConnectionArn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt CodeBuildCacheBucket.Arn
+                  - !Sub ${CodeBuildCacheBucket.Arn}/*
+
+  AppPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-app-pipeline
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref CodeBuildCacheBucket
+        EncryptionKey:
+          Id: !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+          Type: KMS
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: GitHubSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !Ref GitHubConnectionArn
+                FullRepositoryId: !Sub ${GitHubOwner}/${GitHubRepo}
+                BranchName: !Ref GitHubBranch
+                OutputArtifactFormat: CODEBUILD_CLONE_REF
+                DetectChanges: true
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Build
+          Actions:
+            - Name: BuildApp
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectApp
+              InputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 1
+            - Name: BuildFrontend
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectFrontend
+              InputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 1
+
+Outputs:
+  CognitoEventQueueUrl:
+    Value: !Ref CognitoEventQueue
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-CognitoEventQueueUrl
+
+  CognitoEventQueueArn:
+    Value: !GetAtt CognitoEventQueue.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-CognitoEventQueueArn
+
+  ECRRepositoryUri:
+    Value: !GetAtt ECRRepository.RepositoryUri
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ECRRepositoryUri
+
+  ECRFrontendRepositoryUri:
+    Value: !GetAtt ECRFrontendRepository.RepositoryUri
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ECRFrontendRepositoryUri
+
+  CodeBuildProjectAppName:
+    Value: !Ref CodeBuildProjectApp
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-CodeBuildProjectAppName
+
+  CloudTrailBucketName:
+    Value: !Ref CloudTrailBucket
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-CloudTrailBucketName

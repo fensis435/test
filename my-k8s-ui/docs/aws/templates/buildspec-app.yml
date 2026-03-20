@@ -1,0 +1,114 @@
+version: 0.2
+# =============================================================================
+# buildspec-app.yml
+# Triggered by GitHub commit on main branch via CodePipeline.
+# Steps:
+#   1. Get GitHub token from Secrets Manager
+#   2. Docker build (Rails app)
+#   3. Push image to ECR with commit SHA tag
+#   4. Package Helm charts (rails-gui, rails-app)
+#   5. Push packaged charts back to GitHub helm-charts repo
+#   6. Update image tag in values file (triggers ArgoCD auto-sync)
+# =============================================================================
+
+env:
+  secrets-manager:
+    GITHUB_TOKEN: "${GITHUB_SECRET_ARN}:github_token"
+    GITHUB_USER:  "${GITHUB_SECRET_ARN}:github_user"
+
+phases:
+  install:
+    runtime-versions:
+      docker: 20
+    commands:
+      - echo "=== Install tools ==="
+      - curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      - helm version
+      - curl -sSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
+      - chmod +x /usr/local/bin/yq
+      - yq --version
+
+  pre_build:
+    commands:
+      - echo "=== Pre-build ==="
+      - COMMIT_SHA=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c1-8)
+      - IMAGE_TAG="sha-${COMMIT_SHA}"
+      - TIMESTAMP=$(date +%Y%m%d%H%M%S)
+      - CHART_VERSION="0.1.${TIMESTAMP}"
+      - echo "Image tag: ${IMAGE_TAG}, Chart version: ${CHART_VERSION}"
+
+      # ECR login (via VPC endpoint — no internet needed)
+      - echo "=== ECR login ==="
+      - aws ecr get-login-password --region ${AWS_REGION} |
+          docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
+      # Clone helm-charts repo
+      - echo "=== Clone Helm repo ==="
+      - git clone https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/${HELM_REPO_OWNER}/${HELM_REPO_NAME}.git /tmp/helm-repo
+      - cd /tmp/helm-repo && git config user.email "codebuild@ci" && git config user.name "CodeBuild"
+
+  build:
+    commands:
+      - echo "=== Docker build (Rails) ==="
+      - docker build
+          --cache-from ${ECR_REPO_URI}:latest
+          --build-arg BUILDKIT_INLINE_CACHE=1
+          --build-arg RAILS_ENV=production
+          --build-arg COMMIT_SHA=${COMMIT_SHA}
+          -t ${ECR_REPO_URI}:${IMAGE_TAG}
+          -t ${ECR_REPO_URI}:latest
+          -f Dockerfile .
+
+      - echo "=== Push to ECR ==="
+      - docker push ${ECR_REPO_URI}:${IMAGE_TAG}
+      - docker push ${ECR_REPO_URI}:latest
+
+      - echo "=== Package Helm charts ==="
+      # rails-gui chart
+      - cd helm/rails-gui
+      - yq e ".version = \"${CHART_VERSION}\"" -i Chart.yaml
+      - yq e ".appVersion = \"${IMAGE_TAG}\""  -i Chart.yaml
+      - yq e ".image.tag = \"${IMAGE_TAG}\""   -i values.yaml
+      - yq e ".image.repository = \"${ECR_REPO_URI}\"" -i values.yaml
+      - helm dependency update .
+      - helm lint .
+      - helm package . -d /tmp/helm-repo/charts/
+      - cd -
+
+      # rails-app chart
+      - cd helm/rails-app
+      - yq e ".version = \"${CHART_VERSION}\"" -i Chart.yaml
+      - yq e ".appVersion = \"${IMAGE_TAG}\""  -i Chart.yaml
+      - yq e ".image.tag = \"${IMAGE_TAG}\""   -i values.yaml
+      - yq e ".image.repository = \"${ECR_REPO_URI}\"" -i values.yaml
+      - helm dependency update .
+      - helm lint .
+      - helm package . -d /tmp/helm-repo/charts/
+      - cd -
+
+      - echo "=== Update Helm repo index ==="
+      - helm repo index /tmp/helm-repo/charts/ --url https://${HELM_REPO_OWNER}.github.io/${HELM_REPO_NAME}/charts
+
+  post_build:
+    commands:
+      - echo "=== Push Helm packages to GitHub ==="
+      - cd /tmp/helm-repo
+      - git add charts/
+      - git commit -m "ci: update charts to ${IMAGE_TAG} [skip ci]"
+      - git push origin main
+      - echo "=== ArgoCD will auto-detect and sync ==="
+      - echo "Build complete. Image=${ECR_REPO_URI}:${IMAGE_TAG} Chart=${CHART_VERSION}"
+
+artifacts:
+  files:
+    - "**/*"
+  secondary-artifacts:
+    build-summary:
+      files:
+        - build-summary.json
+      discard-paths: yes
+
+cache:
+  paths:
+    - '/root/.cache/pip/**/*'
+    - '/root/.bundle/**/*'

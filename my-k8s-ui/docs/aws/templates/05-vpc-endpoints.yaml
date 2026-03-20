@@ -1,0 +1,588 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  EKS Infrastructure - VPC Endpoints
+  Gateway: S3, DynamoDB
+  Interface: ECR (api/dkr), EC2, STS, Logs, SecretsManager, EKS,
+             EFS, KMS, SQS, SSM, AutoScaling, ElasticLoadBalancing
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eks-project
+  Environment:
+    Type: String
+    Default: prod
+
+Resources:
+
+  # ============================================================
+  # VPC Endpoint Security Group
+  # (Interface endpoints share this SG)
+  # ============================================================
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-vpce-sg
+      GroupDescription: Security group for VPC Interface Endpoints
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      SecurityGroupIngress:
+        # Allow HTTPS from private subnets (EKS nodes)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.10.0/24
+          Description: Private subnet 1 to endpoints
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.11.0/24
+          Description: Private subnet 2 to endpoints
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.12.0/24
+          Description: Private subnet 3 to endpoints
+        # Allow NFS (EFS endpoint) from private subnets
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: 10.0.10.0/24
+          Description: NFS from private subnet 1
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: 10.0.11.0/24
+          Description: NFS from private subnet 2
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: 10.0.12.0/24
+          Description: NFS from private subnet 3
+        # Allow from DB subnets (RDS → Secrets Manager)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.20.0/24
+          Description: DB subnet 1 to endpoints
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.21.0/24
+          Description: DB subnet 2 to endpoints
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.22.0/24
+          Description: DB subnet 3 to endpoints
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpce-sg
+
+  # ============================================================
+  # Gateway Endpoints  (no SG, route-table-based, free)
+  # ============================================================
+
+  # S3 Gateway Endpoint
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateRouteTable1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateRouteTable2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateRouteTable3Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-DBRouteTableId
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # ECR image layers (S3-backed)
+          - Sid: AllowECRS3Access
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+            Resource:
+              - !Sub arn:aws:s3:::prod-${AWS::Region}-starport-layer-bucket/*
+              - !Sub arn:aws:s3:::prod-${AWS::Region}-starport-layer-bucket
+              - arn:aws:s3:::amazonlinux*
+              - arn:aws:s3:::amazonlinux*/*
+          # Application S3 access (allow all within account)
+          - Sid: AllowAccountS3Access
+            Effect: Allow
+            Principal: '*'
+            Action: s3:*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref AWS::AccountId
+
+  # DynamoDB Gateway Endpoint (used by some AWS services internally)
+  DynamoDBGatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateRouteTable1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateRouteTable2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateRouteTable3Id
+
+  # ============================================================
+  # Interface Endpoints  (PrivateLink, billed per-AZ per-hour)
+  # ============================================================
+
+  # ECR API Endpoint
+  ECRAPIEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: ecr:*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref AWS::AccountId
+
+  # ECR Docker Registry Endpoint
+  ECRDKREndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # EC2 Endpoint (required by Karpenter)
+  EC2Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # STS Endpoint (Pod Identity / IRSA token exchange)
+  STSEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.sts
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - sts:AssumeRole
+              - sts:AssumeRoleWithWebIdentity
+              - sts:GetCallerIdentity
+              - sts:TagSession
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref AWS::AccountId
+
+  # CloudWatch Logs Endpoint (EKS control plane & container logs)
+  CloudWatchLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # CloudWatch Monitoring Endpoint
+  CloudWatchMonitoringEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.monitoring
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # Secrets Manager Endpoint (Pod Identity → SM fetch)
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.secretsmanager
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:DescribeSecret
+              - secretsmanager:ListSecrets
+              - secretsmanager:PutSecretValue
+              - secretsmanager:RotateSecret
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref AWS::AccountId
+
+  # EKS Endpoint (kubectl / Karpenter cluster discovery)
+  EKSEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.eks
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # EFS Endpoint (EFS CSI Driver)
+  EFSEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.elasticfilesystem
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # KMS Endpoint (encryption/decryption without NAT)
+  KMSEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.kms
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+              - kms:DescribeKey
+              - kms:CreateGrant
+              - kms:ListGrants
+              - kms:RevokeGrant
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref AWS::AccountId
+
+  # SQS Endpoint (Karpenter interruption queue)
+  SQSEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.sqs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # SSM Endpoint (node management via Session Manager)
+  SSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  SSMMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  EC2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2messages
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # Auto Scaling Endpoint (Karpenter warm pool management)
+  AutoScalingEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.autoscaling
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # Elastic Load Balancing Endpoint (ALB Controller)
+  ELBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.elasticloadbalancing
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  # ============================================================
+  # VPC Flow Logs  (NAT / all traffic visibility)
+  # ============================================================
+  VPCFlowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/vpc/flowlogs/${ProjectName}-${Environment}
+      RetentionInDays: 90
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  VPCFlowLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-vpc-flowlog-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: VPCFlowLogPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: !GetAtt VPCFlowLogGroup.Arn
+
+  VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      ResourceType: VPC
+      TrafficType: ALL
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref VPCFlowLogGroup
+      DeliverLogsPermissionArn: !GetAtt VPCFlowLogRole.Arn
+      LogFormat: >-
+        ${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr}
+        ${srcport} ${dstport} ${protocol} ${packets} ${bytes}
+        ${start} ${end} ${action} ${log-status}
+        ${vpc-id} ${subnet-id} ${instance-id} ${tcp-flags}
+        ${type} ${pkt-srcaddr} ${pkt-dstaddr}
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpc-flowlog
+
+Outputs:
+  VPCEndpointSecurityGroupId:
+    Value: !Ref VPCEndpointSecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-VPCEndpointSecurityGroupId
+
+  S3GatewayEndpointId:
+    Value: !Ref S3GatewayEndpoint
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-S3GatewayEndpointId
+
+  SecretsManagerEndpointId:
+    Value: !Ref SecretsManagerEndpoint
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-SecretsManagerEndpointId
+
+  VPCFlowLogGroupName:
+    Value: !Ref VPCFlowLogGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-VPCFlowLogGroupName

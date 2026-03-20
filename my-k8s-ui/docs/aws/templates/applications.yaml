@@ -1,0 +1,195 @@
+# =============================================================================
+# ArgoCD App-of-Apps Pattern
+# Root application manages all child applications declaratively
+# =============================================================================
+
+# ── App Project ───────────────────────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Platform infrastructure applications
+  sourceRepos:
+    - '*'
+  destinations:
+    - namespace: '*'
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  roles:
+    - name: read-only
+      description: Read-only access to platform project
+      policies:
+        - p, proj:platform:read-only, applications, get, platform/*, allow
+    - name: deployer
+      description: Deploy access to platform project
+      policies:
+        - p, proj:platform:deployer, applications, sync, platform/*, allow
+        - p, proj:platform:deployer, applications, get, platform/*, allow
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: apps
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Application workloads
+  sourceRepos:
+    - '*'
+  destinations:
+    - namespace: 'app'
+      server: https://kubernetes.default.svc
+    - namespace: 'app-*'
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRole
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRoleBinding
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+
+# ── External Secrets Operator ─────────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: external-secrets
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.external-secrets.io
+    chart: external-secrets
+    targetRevision: 0.10.4
+    helm:
+      values: |
+        replicaCount: 2
+        installCRDs: true
+        webhook:
+          replicaCount: 2
+        certController:
+          replicaCount: 2
+        tolerations:
+          - key: CriticalAddonsOnly
+            operator: Exists
+            effect: NoSchedule
+        nodeSelector:
+          role: karpenter-system
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-secrets
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+# ── ClusterSecretStore (AWS Secrets Manager) ──────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: secret-stores
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ARGOCD_REPO_URL_PLACEHOLDER
+    targetRevision: HEAD
+    path: platform/secret-stores
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-secrets
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+# ── Application Namespace Setup ───────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: namespaces
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ARGOCD_REPO_URL_PLACEHOLDER
+    targetRevision: HEAD
+    path: platform/namespaces
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+# ── Main Application ──────────────────────────────────────────────────────────
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: deployments
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: alerts
+spec:
+  project: apps
+  source:
+    repoURL: ARGOCD_REPO_URL_PLACEHOLDER
+    targetRevision: HEAD
+    path: apps/app
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: app
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas   # HPA manages replicas

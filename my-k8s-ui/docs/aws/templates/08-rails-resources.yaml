@@ -1,0 +1,296 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Rails Server EKS Support Resources:
+  - IAM Pod Identity roles (Rails + ArgoCD bridge + SQS consumer)
+  - Additional SG rules for SSH sidecar (rsync/cert-manager)
+  - EFS Access Points (gui-namespace / app-namespace)
+  - SQS permissions for Rails Cognito event consumer
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eks-project
+  Environment:
+    Type: String
+    Default: prod
+
+Resources:
+
+  # ============================================================
+  # Rails Server Pod Identity Role
+  # (Cognito SQS consumer + Secrets Manager + ECR pull + ArgoCD API)
+  # ============================================================
+  RailsPodRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-rails-pod-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: RailsCognitoSQSPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # SQS: consume Cognito user events
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource: !ImportValue
+                  Fn::Sub: ${ProjectName}-${Environment}-CognitoEventQueueArn
+              # KMS: decrypt SQS messages
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                  - kms:DescribeKey
+                Resource: !ImportValue
+                  Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+              # Cognito: read user / group info after event
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminListGroupsForUser
+                  - cognito-idp:ListUsers
+                  - cognito-idp:ListUsersInGroup
+                  - cognito-idp:DescribeUserPool
+                  - cognito-idp:GetGroup
+                  - cognito-idp:ListGroups
+                Resource: !ImportValue
+                  Fn::Sub: ${ProjectName}-${Environment}-CognitoUserPoolArn
+              # Secrets Manager: DB credentials, app secrets
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/${Environment}/*
+              # ECR: pull images (for init containers or health checks)
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*
+              # CloudWatch logs
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/eks/${ProjectName}-${Environment}/*
+              # EFS: describe for health
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:DescribeFileSystems
+                  - elasticfilesystem:DescribeMountTargets
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-rails-pod-role
+
+  # ============================================================
+  # ArgoCD Bridge Role
+  # Rails Job calls ArgoCD API to trigger sync (install/uninstall).
+  # This role gives the Rails pod access to the ArgoCD admin secret.
+  # ============================================================
+  ArgoCDBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-argocd-bridge-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: ArgoCDBridgePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # ArgoCD admin password (for API auth from Rails jobs)
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/${Environment}/argocd/*
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !ImportValue
+                  Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-argocd-bridge-role
+
+  # ============================================================
+  # EFS Access Points per workload type
+  # (EFS is Multi-AZ → no AZ binding issue unlike EBS)
+  # ============================================================
+
+  # GUI namespace access point
+  EFSGUIAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EFSFileSystemId
+      PosixUser:
+        Uid: '1000'
+        Gid: '1000'
+      RootDirectory:
+        CreationInfo:
+          OwnerUid: '1000'
+          OwnerGid: '1000'
+          Permissions: '755'
+        Path: /gui-data
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-efs-gui-ap
+
+  # App namespace access point
+  EFSAppAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EFSFileSystemId
+      PosixUser:
+        Uid: '1000'
+        Gid: '1000'
+      RootDirectory:
+        CreationInfo:
+          OwnerUid: '1000'
+          OwnerGid: '1000'
+          Permissions: '755'
+        Path: /app-data
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-efs-app-ap
+
+  # Shared access point (rsync staging area)
+  EFSSharedAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EFSFileSystemId
+      PosixUser:
+        Uid: '1000'
+        Gid: '1000'
+      RootDirectory:
+        CreationInfo:
+          OwnerUid: '1000'
+          OwnerGid: '1000'
+          Permissions: '755'
+        Path: /shared
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-efs-shared-ap
+
+  # ============================================================
+  # SG rule: allow SSH (2222) between pods for rsync sidecar
+  # cert-manager distributes the host key; no pre-shared key copy needed
+  # ============================================================
+  PodSSHSidecarIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSNodeSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 2222
+      ToPort: 2222
+      SourceSecurityGroupId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSNodeSecurityGroupId
+      Description: Pod-to-pod SSH for rsync sidecar (cert-manager managed keys)
+
+  # ============================================================
+  # CloudWatch Log Groups for Rails workloads
+  # ============================================================
+  RailsGUILogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /eks/${ProjectName}-${Environment}/rails-gui
+      RetentionInDays: 30
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  RailsAppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /eks/${ProjectName}-${Environment}/rails-app
+      RetentionInDays: 30
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  RailsJobLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /eks/${ProjectName}-${Environment}/rails-jobs
+      RetentionInDays: 14
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+
+  # ============================================================
+  # CloudWatch Alarms - Rails SQS consumer lag
+  # ============================================================
+  CognitoQueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-cognito-queue-depth
+      AlarmDescription: Rails is not consuming Cognito events fast enough
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub ${ProjectName}-${Environment}-cognito-user-events
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-AlertSNSTopicArn
+
+Outputs:
+  RailsPodRoleArn:
+    Value: !GetAtt RailsPodRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-RailsPodRoleArn
+
+  ArgoCDBridgeRoleArn:
+    Value: !GetAtt ArgoCDBridgeRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ArgoCDBridgeRoleArn
+
+  EFSGUIAccessPointId:
+    Value: !Ref EFSGUIAccessPoint
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EFSGUIAccessPointId
+
+  EFSAppAccessPointId:
+    Value: !Ref EFSAppAccessPoint
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EFSAppAccessPointId
+
+  EFSSharedAccessPointId:
+    Value: !Ref EFSSharedAccessPoint
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EFSSharedAccessPointId

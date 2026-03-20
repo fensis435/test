@@ -1,0 +1,117 @@
+# =============================================================================
+# platform/cluster-issuers/clusterissuers.yaml
+# cert-manager ClusterIssuers:
+#   1. selfsigned-cluster-issuer  — SSH host key pairs for rsync sidecars
+#   2. selfsigned-ca-issuer       — Internal CA (signs workload certs)
+# Public HTTPS は ALB + ACM で処理するため cert-manager は不要。
+# =============================================================================
+
+# ── Bootstrap: self-signed root ───────────────────────────────────────────────
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-cluster-issuer
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  selfSigned: {}
+
+# ── Internal CA Certificate (cluster-wide) ────────────────────────────────────
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cluster-internal-ca
+  namespace: cert-manager
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  isCA: true
+  secretName: cluster-internal-ca-secret
+  commonName: cluster-internal-ca
+  duration: 87600h      # 10 years
+  renewBefore: 8760h    # renew 1 year before
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-cluster-issuer
+    kind: ClusterIssuer
+
+# ── CA-backed ClusterIssuer (signs rsync SSH certs per namespace) ─────────────
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: internal-ca-issuer
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  ca:
+    secretName: cluster-internal-ca-secret
+
+# =============================================================================
+# platform/cluster-issuers/ssh-cert-template.yaml
+# Certificate template for rsync SSH host keys.
+# Each rails-gui / rails-app Helm chart renders its own Certificate CRD
+# (see rails-gui/templates/misc.yaml) referencing this issuer.
+# This file documents the pattern and provides a namespace-level example.
+# =============================================================================
+---
+# Example: how each GUI/App namespace gets its SSH cert.
+# Actual Certificates are rendered by the Helm chart per release.
+#
+# apiVersion: cert-manager.io/v1
+# kind: Certificate
+# metadata:
+#   name: rails-gui-<user-id>-ssh-cert
+#   namespace: gui-<user-id>
+# spec:
+#   secretName: rails-gui-<user-id>-ssh-cert
+#   issuerRef:
+#     name: internal-ca-issuer      # <-- CA-signed, so clients can verify host
+#     kind: ClusterIssuer
+#   commonName: rails-gui-<user-id>.gui-<user-id>.svc.cluster.local
+#   dnsNames:
+#     - rails-gui-<user-id>
+#     - rails-gui-<user-id>.gui-<user-id>
+#     - rails-gui-<user-id>.gui-<user-id>.svc.cluster.local
+#   duration: 8760h
+#   renewBefore: 720h
+#   privateKey:
+#     algorithm: ECDSA
+#     size: 256
+#     rotationPolicy: Always
+
+# =============================================================================
+# platform/cluster-issuers/ca-configmap.yaml
+# Distribute the internal CA public cert to all namespaces
+# so rsync clients can verify the SSH server cert.
+# =============================================================================
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: internal-ca-issuer-for-clients
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  ca:
+    secretName: cluster-internal-ca-secret
+---
+# Trust Bundle — distribute CA cert to all namespaces via trust-manager
+# (optional: install cert-manager/trust-manager alongside cert-manager)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: internal-ca-bundle
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/part-of: cert-manager
+data:
+  # Populated automatically by trust-manager or manually after CA issuance.
+  # rsync clients use this to verify SSH host certificates.
+  ca.crt: |
+    # POPULATED AUTOMATICALLY BY trust-manager
+    # cert-manager/trust-manager copies cluster-internal-ca-secret.tls.crt here

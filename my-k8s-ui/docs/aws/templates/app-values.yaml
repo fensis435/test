@@ -1,0 +1,263 @@
+# =============================================================================
+# Application Helm Chart Values Template
+# Customize for each environment. Secrets injected via Pod Identity + ESO.
+# =============================================================================
+
+# ── Global ────────────────────────────────────────────────────────────────────
+global:
+  projectName: "eks-project"
+  environment: "prod"
+  region: "ap-northeast-1"
+  domain: "example.com"          # Replace with your domain
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+image:
+  repository: "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/app"
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# ── Replicas & Autoscaling ────────────────────────────────────────────────────
+replicaCount: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+# ── Service Account (Pod Identity) ───────────────────────────────────────────
+serviceAccount:
+  create: true
+  name: "app-sa"
+  annotations: {}   # Pod Identity does not need annotations (unlike IRSA)
+
+# ── Cognito JWT Authentication ────────────────────────────────────────────────
+cognito:
+  userPoolId: ""                 # Injected from ConfigMap or param
+  clientId: ""                   # Injected from ConfigMap or param
+  region: "ap-northeast-1"
+  # JWT issuer URL pattern: https://cognito-idp.{region}.amazonaws.com/{userPoolId}
+  jwtIssuer: ""                  # Set at deploy time
+  jwtAudience: ""                # = clientId
+  # Token validation
+  tokenExpiry: 3600              # seconds
+  refreshTokenExpiry: 2592000    # 30 days
+
+# ── Database (RDS PostgreSQL via IAM Auth) ────────────────────────────────────
+database:
+  host: ""                       # Injected from cluster-config ConfigMap
+  readerHost: ""                 # Read replica endpoint
+  port: 5432
+  name: "appdb"
+  username: "appuser"
+  # Use AWS Secrets Manager for password (fetched via Pod Identity)
+  secretArn: ""                  # Injected at deploy time
+  # Connection pool
+  pool:
+    min: 5
+    max: 30
+    idleTimeoutMs: 10000
+    connectionTimeoutMs: 3000
+  ssl:
+    enabled: true
+    rejectUnauthorized: true
+
+# ── Persistent Volumes ────────────────────────────────────────────────────────
+persistence:
+  # EBS - ReadWriteOnce (per-pod state, e.g. local cache)
+  ebs:
+    enabled: true
+    storageClass: "ebs-gp3-encrypted"
+    accessMode: ReadWriteOnce
+    size: "20Gi"
+    mountPath: "/data/local"
+
+  # EFS - ReadWriteMany (shared storage, e.g. uploads, shared assets)
+  efs:
+    enabled: true
+    storageClass: "efs-sc"
+    accessMode: ReadWriteMany
+    size: "50Gi"
+    mountPath: "/data/shared"
+
+# ── Ingress (ALB) ─────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: "alb"
+  annotations:
+    alb.ingress.kubernetes.io/scheme: "internet-facing"
+    alb.ingress.kubernetes.io/target-type: "ip"
+    alb.ingress.kubernetes.io/certificate-arn: ""     # Set at deploy
+    alb.ingress.kubernetes.io/ssl-policy: "ELBSecurityPolicy-TLS13-1-2-2021-06"
+    alb.ingress.kubernetes.io/wafv2-acl-arn: ""       # Set at deploy
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: "/health"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+    alb.ingress.kubernetes.io/success-codes: "200-299"
+    alb.ingress.kubernetes.io/target-group-attributes: |
+      stickiness.enabled=true,
+      stickiness.lb_cookie.duration_seconds=86400,
+      deregistration_delay.timeout_seconds=30
+    alb.ingress.kubernetes.io/load-balancer-attributes: |
+      access_logs.s3.enabled=true,
+      idle_timeout.timeout_seconds=60
+  hosts:
+    - host: ""                   # example.com - set at deploy
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# ── Service ───────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# ── Environment variables for app containers ──────────────────────────────────
+env:
+  # Cognito
+  - name: COGNITO_USER_POOL_ID
+    valueFrom:
+      configMapKeyRef:
+        name: cluster-config
+        key: COGNITO_USER_POOL_ID
+  - name: COGNITO_CLIENT_ID
+    valueFrom:
+      configMapKeyRef:
+        name: cluster-config
+        key: COGNITO_CLIENT_ID
+  - name: AWS_REGION
+    valueFrom:
+      configMapKeyRef:
+        name: cluster-config
+        key: AWS_REGION
+  # Database
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: cluster-config
+        key: RDS_ENDPOINT
+  - name: DB_READER_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: cluster-config
+        key: RDS_READER_ENDPOINT
+  - name: DB_SECRET_ARN
+    valueFrom:
+      configMapKeyRef:
+        name: cluster-config
+        key: DB_SECRET_ARN
+  - name: DB_NAME
+    value: "appdb"
+  # App
+  - name: NODE_ENV
+    value: "production"
+  - name: LOG_LEVEL
+    value: "info"
+
+# ── Pod Disruption Budget ─────────────────────────────────────────────────────
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# ── Topology Spread Constraints ───────────────────────────────────────────────
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: app
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: app
+
+# ── Pod Security Context ──────────────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ── Probes ────────────────────────────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 3
+  timeoutSeconds: 5
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  failureThreshold: 3
+  timeoutSeconds: 3
+
+startupProbe:
+  httpGet:
+    path: /health/startup
+    port: 8080
+  failureThreshold: 30
+  periodSeconds: 10
+
+# ── Node Affinity (prefer on-demand for critical workloads) ───────────────────
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 70
+        preference:
+          matchExpressions:
+            - key: karpenter.sh/capacity-type
+              operator: In
+              values:
+                - on-demand
+      - weight: 30
+        preference:
+          matchExpressions:
+            - key: karpenter.sh/capacity-type
+              operator: In
+              values:
+                - spot
+
+# ── Network Policy ────────────────────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aws-load-balancer
+      ports:
+        - port: 8080
+  egress:
+    - to: []   # Allow all egress (restrict further if needed)

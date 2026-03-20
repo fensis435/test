@@ -1,0 +1,288 @@
+{{/* ==========================================================================
+  rails-app/templates/misc.yaml
+  PVC(EFS), Certificate(cert-manager), Leader Election RBAC,
+  ArgoCD Application, Service, HPA, PDB, NetworkPolicy
+  ========================================================================== */}}
+
+# ── EFS PVC (ReadWriteMany — Multi-AZ safe) ───────────────────────────────────
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "rails-app.fullname" . }}-efs
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-app.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+  volumeMode: Filesystem
+
+# ── cert-manager Certificate (SSH host key, CA-signed) ───────────────────────
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "rails-app.fullname" . }}-ssh-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-app.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  secretName: {{ include "rails-app.fullname" . }}-ssh-cert
+  issuerRef:
+    name: internal-ca-issuer
+    kind: ClusterIssuer
+  commonName: {{ include "rails-app.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  dnsNames:
+    - {{ include "rails-app.fullname" . }}
+    - {{ include "rails-app.fullname" . }}.{{ .Release.Namespace }}
+    - {{ include "rails-app.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+
+# ── ServiceAccount ────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "rails-app.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-app.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+
+# ── Leader Election RBAC ──────────────────────────────────────────────────────
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "rails-app.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["rails-app-leader"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "rails-app.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "rails-app.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "rails-app.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+
+# ── ArgoCD Application (managed by ArgoCD, called by Rails Job for install/uninstall) ──
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ include "rails-app.fullname" . }}
+  namespace: argocd
+  labels:
+    {{- include "rails-app.labels" . | nindent 4 }}
+    app.kubernetes.io/managed-by-rails: "true"
+    app.kubernetes.io/project-id: {{ .Values.project.id | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: apps
+  source:
+    repoURL: {{ .Values.argocd.helmRepoUrl }}
+    chart: rails-app
+    targetRevision: {{ .Values.argocd.chartVersion | default "*" }}
+    helm:
+      valueFiles:
+        - values.yaml
+      parameters:
+        - name: image.tag
+          value: {{ .Values.image.tag | quote }}
+        - name: project.id
+          value: {{ .Values.project.id | quote }}
+        - name: project.name
+          value: {{ .Values.project.name | quote }}
+        - name: namespace
+          value: {{ .Release.Namespace | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ .Release.Namespace }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+
+# ── Service ───────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rails-app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-app.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "rails-app.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+    - name: ssh
+      port: 2222
+      targetPort: 2222
+
+# ── HPA ───────────────────────────────────────────────────────────────────────
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "rails-app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "rails-app.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+      selectPolicy: Max
+
+# ── PDB ───────────────────────────────────────────────────────────────────────
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "rails-app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "rails-app.selectorLabels" . | nindent 6 }}
+
+# ── NetworkPolicy ─────────────────────────────────────────────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rails-app.fullname" . }}-netpol
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "rails-app.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # ALB Controller ingress
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aws-load-balancer
+      ports:
+        - port: 3000
+    # Intra-namespace (pod-to-pod, rsync)
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 2222
+        - port: 3000
+    # GUI namespace can rsync to App namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by-rails: "gui"
+      ports:
+        - port: 2222
+  egress:
+    # DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # HTTPS (AWS APIs via VPC endpoints, ArgoCD)
+    - ports:
+        - protocol: TCP
+          port: 443
+    # PostgreSQL (RDS)
+    - ports:
+        - protocol: TCP
+          port: 5432
+    # EFS NFS
+    - ports:
+        - protocol: TCP
+          port: 2049
+    # rsync SSH to other pods
+    - ports:
+        - protocol: TCP
+          port: 2222

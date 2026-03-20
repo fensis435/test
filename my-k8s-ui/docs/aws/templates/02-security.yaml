@@ -1,0 +1,384 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EKS Infrastructure - Security Groups, WAF'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eks-project
+  Environment:
+    Type: String
+    Default: prod
+
+Resources:
+
+  # ============================================================
+  # Security Groups
+  # ============================================================
+
+  # ALB Security Group (Internet-facing)
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-alb-sg
+      GroupDescription: Security group for ALB - public internet access
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP redirect
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIpv6: '::/0'
+          Description: HTTP redirect IPv6
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: '::/0'
+          Description: HTTPS IPv6
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-alb-sg
+
+  # EKS Cluster Control Plane Security Group
+  EKSClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-eks-cluster-sg
+      GroupDescription: Security group for EKS control plane
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-eks-cluster-sg
+
+  # EKS Node Security Group
+  EKSNodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-eks-node-sg
+      GroupDescription: Security group for EKS worker nodes (Karpenter managed)
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-eks-node-sg
+        - Key: !Sub kubernetes.io/cluster/${ProjectName}-${Environment}
+          Value: owned
+        - Key: karpenter.sh/discovery
+          Value: !Sub ${ProjectName}-${Environment}
+
+  # Node -> Node (all internal traffic within cluster)
+  NodeToNodeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EKSNodeSecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref EKSNodeSecurityGroup
+      Description: Allow all traffic between nodes
+
+  # ALB -> Node (NodePort / healthcheck range)
+  ALBToNodeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EKSNodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 1025
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Description: ALB to NodePort range
+
+  # Control Plane -> Node (kubelet API)
+  ControlPlaneToNodeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EKSNodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 10250
+      ToPort: 10250
+      SourceSecurityGroupId: !Ref EKSClusterSecurityGroup
+      Description: Control plane to kubelet
+
+  # Control Plane -> Node (cluster extensions)
+  ControlPlaneToNodeExtIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EKSNodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref EKSClusterSecurityGroup
+      Description: Control plane HTTPS to nodes
+
+  EKSNodeEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref EKSNodeSecurityGroup
+      IpProtocol: -1
+      CidrIp: 0.0.0.0/0
+      Description: Allow all outbound
+
+  # Node -> Control Plane
+  NodeToControlPlaneIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EKSClusterSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref EKSNodeSecurityGroup
+      Description: Nodes to control plane API
+
+  EKSClusterEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref EKSClusterSecurityGroup
+      IpProtocol: -1
+      CidrIp: 0.0.0.0/0
+
+  # RDS Security Group
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-rds-sg
+      GroupDescription: Security group for RDS PostgreSQL
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 127.0.0.1/32
+          Description: Deny all outbound (RDS isolation)
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-rds-sg
+
+  NodeToRDSIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RDSSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref EKSNodeSecurityGroup
+      Description: EKS nodes to PostgreSQL
+
+  # EFS Security Group
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-efs-sg
+      GroupDescription: Security group for EFS
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-efs-sg
+
+  NodeToEFSIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EFSSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !Ref EKSNodeSecurityGroup
+      Description: EKS nodes to NFS
+
+  EFSEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref EFSSecurityGroup
+      IpProtocol: -1
+      CidrIp: 0.0.0.0/0
+
+  # ============================================================
+  # WAF v2
+  # ============================================================
+  WAFIPSet:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-blocked-ips
+      Scope: REGIONAL
+      IPAddressVersion: IPV4
+      Addresses: []
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-blocked-ips
+
+  WAFWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-waf
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${ProjectName}-${Environment}-waf-metric
+      Rules:
+        # AWS Managed - Common Rule Set
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 10
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSetMetric
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+
+        # AWS Managed - Known Bad Inputs
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 20
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesKnownBadInputsRuleSetMetric
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+
+        # AWS Managed - SQL Injection
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 30
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesSQLiRuleSetMetric
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+
+        # AWS Managed - Linux OS
+        - Name: AWSManagedRulesLinuxRuleSet
+          Priority: 40
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesLinuxRuleSetMetric
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesLinuxRuleSet
+
+        # AWS Managed - Bot Control
+        - Name: AWSManagedRulesBotControlRuleSet
+          Priority: 50
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesBotControlRuleSetMetric
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesBotControlRuleSet
+              ManagedRuleGroupConfigs:
+                - AWSManagedRulesBotControlRuleSet:
+                    InspectionLevel: COMMON
+
+        # Rate Limiting
+        - Name: RateLimitRule
+          Priority: 60
+          Action:
+            Block: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitRuleMetric
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+
+        # Block suspicious IPs
+        - Name: BlockBadIPs
+          Priority: 5
+          Action:
+            Block: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: BlockBadIPsMetric
+          Statement:
+            IPSetReferenceStatement:
+              Arn: !GetAtt WAFIPSet.Arn
+
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-waf
+
+  # WAF Logging
+  WAFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub aws-waf-logs-${ProjectName}-${Environment}
+      RetentionInDays: 90
+
+  WAFLoggingConfig:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt WAFWebACL.Arn
+      LogDestinationConfigs:
+        - !GetAtt WAFLogGroup.Arn
+      RedactedFields:
+        - SingleHeader:
+            Name: authorization
+        - SingleHeader:
+            Name: cookie
+
+Outputs:
+  ALBSecurityGroupId:
+    Value: !Ref ALBSecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ALBSecurityGroupId
+
+  EKSClusterSecurityGroupId:
+    Value: !Ref EKSClusterSecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EKSClusterSecurityGroupId
+
+  EKSNodeSecurityGroupId:
+    Value: !Ref EKSNodeSecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EKSNodeSecurityGroupId
+
+  RDSSecurityGroupId:
+    Value: !Ref RDSSecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-RDSSecurityGroupId
+
+  EFSSecurityGroupId:
+    Value: !Ref EFSSecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EFSSecurityGroupId
+
+  WAFWebACLArn:
+    Value: !GetAtt WAFWebACL.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-WAFWebACLArn
