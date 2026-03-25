@@ -1,50 +1,48 @@
 {{/* ==========================================================================
-  rails-gui/templates/misc.yaml
-  EFS PVC / cert-manager Certificate / Leader Election RBAC /
-  ArgoCD Application CRD / ArgoCD同期待機Job / Service / HPA / PDB /
-  NetworkPolicy / ExternalSecret
+  rails-app/templates/misc.yaml
+  rails-gui と同構成。プロジェクト単位namespace(app-{id})に deploy される。
   ========================================================================== */}}
 
-# ── EFS PVC (ReadWriteMany — 2AZ安全) ────────────────────────────────────────
+# ── EFS PVC ───────────────────────────────────────────────────────────────────
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "rails-gui.fullname" . }}-efs
+  name: {{ include "rails-app.fullname" . }}-efs
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "rails-gui.labels" . | nindent 4 }}
+    {{- include "rails-app.labels" . | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "0"
 spec:
   accessModes:
-    - ReadWriteMany   # EFSのみ使用 (EBSはAZ固定でMulti-AZに不適)
+    - ReadWriteMany
   storageClassName: efs-sc
   resources:
     requests:
       storage: {{ .Values.persistence.size }}
 
-# ── cert-manager Certificate (SSH host key — rsync sidecar用) ─────────────────
+# ── cert-manager Certificate ──────────────────────────────────────────────────
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: {{ include "rails-gui.fullname" . }}-ssh-cert
+  name: {{ include "rails-app.fullname" . }}-ssh-cert
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "rails-gui.labels" . | nindent 4 }}
+    {{- include "rails-app.labels" . | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "1"
 spec:
-  secretName: {{ include "rails-gui.fullname" . }}-ssh-cert
+  secretName: {{ include "rails-app.fullname" . }}-ssh-cert
   issuerRef:
-    name: internal-ca-issuer   # cert-managerが管理するClusterIssuer
+    name: internal-ca-issuer
     kind: ClusterIssuer
-  commonName: {{ include "rails-gui.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  commonName: {{ include "rails-app.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
   dnsNames:
-    - {{ include "rails-gui.fullname" . }}
-    - {{ include "rails-gui.fullname" . }}.{{ .Release.Namespace }}
-    - {{ include "rails-gui.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+    - {{ include "rails-app.fullname" . }}
+    - {{ include "rails-app.fullname" . }}.{{ .Release.Namespace }}
+    - {{ include "rails-app.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
   duration: 8760h
   renewBefore: 720h
   privateKey:
@@ -57,20 +55,20 @@ spec:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "rails-gui.serviceAccountName" . }}
+  name: {{ include "rails-app.serviceAccountName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "rails-gui.labels" . | nindent 4 }}
+    {{- include "rails-app.labels" . | nindent 4 }}
   annotations:
     argocd.argoproj.io/sync-wave: "0"
-automountServiceAccountToken: true   # Pod Identity に必要
+automountServiceAccountToken: true
 
 # ── Leader Election RBAC ──────────────────────────────────────────────────────
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "rails-gui.fullname" . }}-leader-election
+  name: {{ include "rails-app.fullname" . }}-leader-election
   namespace: {{ .Release.Namespace }}
 rules:
   - apiGroups: ["coordination.k8s.io"]
@@ -78,7 +76,7 @@ rules:
     verbs: ["get", "create", "update", "patch"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    resourceNames: ["rails-gui-leader"]
+    resourceNames: ["rails-app-leader"]
     verbs: ["get", "create", "update", "patch"]
   - apiGroups: [""]
     resources: ["events"]
@@ -87,28 +85,28 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "rails-gui.fullname" . }}-leader-election
+  name: {{ include "rails-app.fullname" . }}-leader-election
   namespace: {{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "rails-gui.fullname" . }}-leader-election
+  name: {{ include "rails-app.fullname" . }}-leader-election
 subjects:
   - kind: ServiceAccount
-    name: {{ include "rails-gui.serviceAccountName" . }}
+    name: {{ include "rails-app.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 
-# ── ArgoCD Application (upgrade自動、install/uninstallはRails Job経由) ──────────
-# Rails Job が ArgoCD API で sync/delete → 完了を周期ポーリングで待機
+# ── ArgoCD Application ────────────────────────────────────────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: {{ include "rails-gui.fullname" . }}
+  name: {{ include "rails-app.fullname" . }}
   namespace: argocd
   labels:
-    {{- include "rails-gui.labels" . | nindent 4 }}
-    app.kubernetes.io/managed-by-rails: "gui"
+    {{- include "rails-app.labels" . | nindent 4 }}
+    app.kubernetes.io/managed-by-rails: "app"
+    app.kubernetes.io/project-id: {{ .Values.project.id | quote }}
   annotations:
     argocd.argoproj.io/sync-wave: "2"
   finalizers:
@@ -117,24 +115,27 @@ spec:
   project: rails-workloads
   source:
     repoURL: {{ .Values.argocd.helmRepoUrl }}
-    chart: rails-gui
+    chart: rails-app
     targetRevision: {{ .Values.argocd.chartVersion | default "*" }}
     helm:
       parameters:
         - name: image.tag
           value: {{ .Values.image.tag | quote }}
+        - name: project.id
+          value: {{ .Values.project.id | quote }}
+        - name: project.name
+          value: {{ .Values.project.name | quote }}
         - name: namespace
           value: {{ .Release.Namespace | quote }}
   destination:
     server: https://kubernetes.default.svc
     namespace: {{ .Release.Namespace }}
   syncPolicy:
-    # upgrade: ArgoCD が自動検出・自動sync (CodeBuildがHelm repo更新時)
     automated:
       prune: true
       selfHeal: true
     syncOptions:
-      - CreateNamespace=false   # Rails Job pre-hookが作成済み
+      - CreateNamespace=false
       - RespectIgnoreDifferences=true
     retry:
       limit: 3
@@ -146,79 +147,99 @@ spec:
     - group: apps
       kind: Deployment
       jsonPointers:
-        - /spec/replicas   # HPA管理
+        - /spec/replicas
 
-# ── ArgoCD同期待機Job ──────────────────────────────────────────────────────────
-# Rails の helm install/uninstall Jobから呼び出される。
-# install: ArgoCD Applicationを作成してsyncをトリガー → 完了まで周期ポーリング
-# uninstall: ArgoCD Applicationをdeleteして削除完了まで周期ポーリング
-# このJobがRailsの既存pre/post処理フローに組み込まれ、同期完了後にpostを実行。
+# ── ArgoCD 同期待機スクリプト (rails-guiと同一内容) ─────────────────────────────
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "rails-gui.fullname" . }}-argocd-scripts
+  name: {{ include "rails-app.fullname" . }}-argocd-scripts
   namespace: {{ .Release.Namespace }}
 data:
   wait-for-sync.sh: |
     #!/bin/bash
     # ==========================================================================
-    # ArgoCD sync 完了待機スクリプト
-    # Rails Job から呼び出される。ARGOCD_APP_NAME / ACTION (install|uninstall) を受け取る。
-    # ArgoCDのREST APIをポーリングしてsync/delete完了を確認する。
+    # ArgoCD sync/delete 完了待機スクリプト
+    # 呼び出し元: Rails Job (pre/post処理フロー内の helm install/uninstall ステップ)
+    #
+    # [install フロー]
+    #   Rails Job pre処理
+    #     → (このスクリプト) ArgoCD API POST /sync → Synced+Healthy まで周期ポーリング
+    #   → Rails Job post処理
+    #
+    # [uninstall フロー]
+    #   Rails Job pre処理
+    #     → (このスクリプト) ArgoCD API DELETE app → 404 まで周期ポーリング
+    #   → Rails Job post処理
     # ==========================================================================
     set -euo pipefail
 
     ARGOCD_SERVER="${ARGOCD_SERVER:-argocd-server.argocd.svc.cluster.local:443}"
-    ARGOCD_APP="${ARGOCD_APP_NAME}"
-    ACTION="${ACTION:-install}"        # install または uninstall
-    POLL_INTERVAL="${POLL_INTERVAL:-5}" # 秒
-    TIMEOUT="${TIMEOUT:-300}"           # タイムアウト秒
+    ARGOCD_APP="${ARGOCD_APP_NAME:?ARGOCD_APP_NAME is required}"
+    ACTION="${ACTION:-install}"
+    POLL_INTERVAL="${POLL_INTERVAL:-5}"
+    TIMEOUT="${TIMEOUT:-300}"
 
-    # ArgoCDトークン取得 (Secrets Manager経由 — RailsPodRoleが許可)
+    # ArgoCDトークン取得 (Pod IdentityでSM呼び出し可能)
     TOKEN=$(aws secretsmanager get-secret-value \
-      --secret-id "${ARGOCD_TOKEN_SECRET_ARN}" \
+      --secret-id "${ARGOCD_TOKEN_SECRET_ARN:?}" \
       --query SecretString --output text | jq -r '.token')
 
-    argocd_api() {
+    argocd_get() {
+      curl -sk -o /dev/null -w "%{http_code}\n%{stdout}" \
+        -H "Authorization: Bearer ${TOKEN}" \
+        "https://${ARGOCD_SERVER}/api/v1/$1"
+    }
+
+    argocd_get_json() {
       curl -sk -H "Authorization: Bearer ${TOKEN}" \
         "https://${ARGOCD_SERVER}/api/v1/$1"
     }
 
-    argocd_api_post() {
-      curl -sk -X POST -H "Authorization: Bearer ${TOKEN}" \
+    argocd_post() {
+      curl -sk -X POST \
+        -H "Authorization: Bearer ${TOKEN}" \
         -H "Content-Type: application/json" \
-        -d "$2" \
+        -d "${2:-{\}}" \
         "https://${ARGOCD_SERVER}/api/v1/$1"
+    }
+
+    argocd_delete() {
+      curl -sk -X DELETE \
+        -H "Authorization: Bearer ${TOKEN}" \
+        "https://${ARGOCD_SERVER}/api/v1/applications/${ARGOCD_APP}?cascade=true&propagationPolicy=foreground"
     }
 
     elapsed=0
 
+    # ── install: sync トリガー → Synced+Healthy 待機 ─────────────────────────
     if [[ "${ACTION}" == "install" ]]; then
-      echo "[ArgoCD] Triggering sync for app: ${ARGOCD_APP}"
+      echo "[$(date +%T)] ArgoCD sync trigger: ${ARGOCD_APP}"
 
-      # sync をトリガー
-      argocd_api_post "applications/${ARGOCD_APP}/sync" \
-        '{"prune":true,"dryRun":false,"strategy":{"hook":{"force":true}}}'
+      argocd_post "applications/${ARGOCD_APP}/sync" \
+        '{"prune":true,"dryRun":false,"strategy":{"hook":{"force":true}}}' \
+        > /dev/null
 
-      # Synced + Healthy になるまでポーリング
       while [[ $elapsed -lt $TIMEOUT ]]; do
-        response=$(argocd_api "applications/${ARGOCD_APP}" 2>/dev/null || echo "{}")
-        sync_status=$(echo "$response"   | jq -r '.status.sync.status   // "Unknown"')
-        health_status=$(echo "$response" | jq -r '.status.health.status // "Unknown"')
-        op_phase=$(echo "$response"      | jq -r '.status.operationState.phase // "Unknown"')
+        resp=$(argocd_get_json "applications/${ARGOCD_APP}" 2>/dev/null || echo "{}")
 
-        echo "[ArgoCD] ${elapsed}s — sync=${sync_status}, health=${health_status}, op=${op_phase}"
+        sync_status=$(  echo "$resp" | jq -r '.status.sync.status          // "Unknown"')
+        health_status=$(echo "$resp" | jq -r '.status.health.status        // "Unknown"')
+        op_phase=$(     echo "$resp" | jq -r '.status.operationState.phase // "Unknown"')
 
+        echo "[$(date +%T)] +${elapsed}s sync=${sync_status} health=${health_status} op=${op_phase}"
+
+        # 成功
         if [[ "${sync_status}" == "Synced" && "${health_status}" == "Healthy" ]]; then
-          echo "[ArgoCD] ✓ Application ${ARGOCD_APP} is Synced and Healthy"
+          echo "[$(date +%T)] ✓ ${ARGOCD_APP} Synced and Healthy"
           exit 0
         fi
 
-        # エラー検出
+        # 失敗
         if [[ "${op_phase}" == "Failed" || "${op_phase}" == "Error" ]]; then
-          error_msg=$(echo "$response" | jq -r '.status.operationState.message // "unknown error"')
-          echo "[ArgoCD] ✗ Sync failed: ${error_msg}"
+          msg=$(echo "$resp" | jq -r '.status.operationState.message // "no detail"')
+          echo "[$(date +%T)] ✗ Sync failed: ${msg}"
           exit 1
         fi
 
@@ -226,26 +247,24 @@ data:
         elapsed=$((elapsed + POLL_INTERVAL))
       done
 
-      echo "[ArgoCD] ✗ Timeout after ${TIMEOUT}s waiting for sync"
+      echo "[$(date +%T)] ✗ Timeout (${TIMEOUT}s) waiting for sync"
       exit 1
 
+    # ── uninstall: delete → 404 待機 ─────────────────────────────────────────
     elif [[ "${ACTION}" == "uninstall" ]]; then
-      echo "[ArgoCD] Deleting app: ${ARGOCD_APP}"
+      echo "[$(date +%T)] ArgoCD delete (cascade): ${ARGOCD_APP}"
 
-      # cascade delete (関連リソースも削除)
-      argocd_api_post "applications/${ARGOCD_APP}?cascade=true&propagationPolicy=foreground" "" \
-        2>/dev/null || true
+      argocd_delete > /dev/null 2>&1 || true
 
-      # Application が消えるまでポーリング
       while [[ $elapsed -lt $TIMEOUT ]]; do
-        status_code=$(curl -sk -o /dev/null -w "%{http_code}" \
+        http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
           -H "Authorization: Bearer ${TOKEN}" \
           "https://${ARGOCD_SERVER}/api/v1/applications/${ARGOCD_APP}")
 
-        echo "[ArgoCD] ${elapsed}s — HTTP ${status_code}"
+        echo "[$(date +%T)] +${elapsed}s HTTP=${http_code}"
 
-        if [[ "${status_code}" == "404" ]]; then
-          echo "[ArgoCD] ✓ Application ${ARGOCD_APP} deleted successfully"
+        if [[ "${http_code}" == "404" ]]; then
+          echo "[$(date +%T)] ✓ ${ARGOCD_APP} deleted"
           exit 0
         fi
 
@@ -253,7 +272,11 @@ data:
         elapsed=$((elapsed + POLL_INTERVAL))
       done
 
-      echo "[ArgoCD] ✗ Timeout after ${TIMEOUT}s waiting for delete"
+      echo "[$(date +%T)] ✗ Timeout (${TIMEOUT}s) waiting for delete"
+      exit 1
+
+    else
+      echo "Unknown ACTION: ${ACTION} (use install or uninstall)"
       exit 1
     fi
 
@@ -262,14 +285,14 @@ data:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "rails-gui.fullname" . }}
+  name: {{ include "rails-app.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "rails-gui.labels" . | nindent 4 }}
+    {{- include "rails-app.labels" . | nindent 4 }}
 spec:
   type: ClusterIP
   selector:
-    {{- include "rails-gui.selectorLabels" . | nindent 4 }}
+    {{- include "rails-app.selectorLabels" . | nindent 4 }}
   ports:
     - name: http
       port: 80
@@ -283,13 +306,13 @@ spec:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "rails-gui.fullname" . }}
+  name: {{ include "rails-app.fullname" . }}
   namespace: {{ .Release.Namespace }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "rails-gui.fullname" . }}
+    name: {{ include "rails-app.fullname" . }}
   minReplicas: {{ .Values.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.autoscaling.maxReplicas }}
   metrics:
@@ -308,31 +331,42 @@ spec:
   behavior:
     scaleDown:
       stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+      selectPolicy: Max
 
 # ── PDB ───────────────────────────────────────────────────────────────────────
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "rails-gui.fullname" . }}
+  name: {{ include "rails-app.fullname" . }}
   namespace: {{ .Release.Namespace }}
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      {{- include "rails-gui.selectorLabels" . | nindent 6 }}
+      {{- include "rails-app.selectorLabels" . | nindent 6 }}
 
 # ── NetworkPolicy ─────────────────────────────────────────────────────────────
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "rails-gui.fullname" . }}-netpol
+  name: {{ include "rails-app.fullname" . }}-netpol
   namespace: {{ .Release.Namespace }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "rails-gui.selectorLabels" . | nindent 6 }}
+      {{- include "rails-app.selectorLabels" . | nindent 6 }}
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
@@ -346,6 +380,12 @@ spec:
       ports:
         - port: 2222
         - port: 3000
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by-rails: "gui"
+      ports:
+        - port: 2222
   egress:
     - ports:
         - protocol: UDP
@@ -365,7 +405,7 @@ spec:
         - protocol: TCP
           port: 2222
 
-# ── ExternalSecret (DB credentials from Secrets Manager) ──────────────────────
+# ── ExternalSecret (DB credentials) ──────────────────────────────────────────
 ---
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret

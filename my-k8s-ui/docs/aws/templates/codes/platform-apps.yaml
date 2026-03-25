@@ -1,10 +1,8 @@
 # =============================================================================
 # argocd/platform-apps.yaml
-# Platform-level ArgoCD Applications:
-#   - cert-manager (cluster-wide)
-#   - ClusterIssuer (self-signed for SSH, ACM for public HTTPS via ALB)
-#   - External Secrets Operator
-#   - CloudWatch Container Insights
+# Platform管理系ArgoCD Application群。
+# 全コンポーネントにToleration: CriticalAddonsOnly=true:NoSchedule を設定
+# → system managed node group上だけで動作する。Karpenter workerには来ない。
 # =============================================================================
 
 # ── cert-manager ──────────────────────────────────────────────────────────────
@@ -25,25 +23,27 @@ spec:
     helm:
       values: |
         installCRDs: true
-        replicaCount: 2
+        replicaCount: 1
         webhook:
-          replicaCount: 2
+          replicaCount: 1
         cainjector:
-          replicaCount: 2
-        global:
-          leaderElection:
-            namespace: cert-manager
-        podLabels:
-          app.kubernetes.io/part-of: platform
+          replicaCount: 1
         tolerations:
           - key: CriticalAddonsOnly
             operator: Exists
             effect: NoSchedule
+        webhook:
+          tolerations:
+            - key: CriticalAddonsOnly
+              operator: Exists
+              effect: NoSchedule
+        cainjector:
+          tolerations:
+            - key: CriticalAddonsOnly
+              operator: Exists
+              effect: NoSchedule
         nodeSelector:
-          role: karpenter-system
-        # Use VPC endpoint for Route53 (private DNS validation for internal certs)
-        extraArgs:
-          - --dns01-recursive-nameservers-only=false
+          role: system
   destination:
     server: https://kubernetes.default.svc
     namespace: cert-manager
@@ -54,7 +54,7 @@ spec:
     syncOptions:
       - CreateNamespace=true
 
-# ── ClusterIssuers ────────────────────────────────────────────────────────────
+# ── cluster-issuers (cert-manager CRD依存) ───────────────────────────────────
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -76,7 +76,6 @@ spec:
     automated:
       prune: true
       selfHeal: true
-    # Must wait for cert-manager CRDs to be ready
     syncOptions:
       - CreateNamespace=true
 
@@ -87,6 +86,8 @@ kind: Application
 metadata:
   name: external-secrets
   namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: platform
   source:
@@ -95,18 +96,58 @@ spec:
     targetRevision: 0.10.4
     helm:
       values: |
-        replicaCount: 2
+        replicaCount: 1
         installCRDs: true
         tolerations:
           - key: CriticalAddonsOnly
             operator: Exists
             effect: NoSchedule
+        webhook:
+          tolerations:
+            - key: CriticalAddonsOnly
+              operator: Exists
+              effect: NoSchedule
+        certController:
+          tolerations:
+            - key: CriticalAddonsOnly
+              operator: Exists
+              effect: NoSchedule
         nodeSelector:
-          role: karpenter-system
+          role: system
+        serviceAccount:
+          name: external-secrets
+          # Pod Identity — アノテーション不要 (deploy.shでassociation作成)
   destination:
     server: https://kubernetes.default.svc
     namespace: external-secrets
   syncPolicy:
-    automated: { prune: true, selfHeal: true }
+    automated:
+      prune: true
+      selfHeal: true
     syncOptions:
       - CreateNamespace=true
+
+# ── ClusterSecretStore (ESO → AWS Secrets Manager) ────────────────────────────
+# ESO pod のServiceAccountがPod Identityで IAMロール(ESOControllerRole)を引き受け
+# → secretsmanager:GetSecretValue をVPCエンドポイント経由で呼ぶ
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: secret-stores
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: ARGOCD_REPO_URL_PLACEHOLDER
+    targetRevision: HEAD
+    path: platform/secret-stores
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-secrets
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

@@ -201,25 +201,6 @@ Resources:
       AlarmActions:
         - !Ref AlertSNSTopic
 
-  NATGateway3ErrorPortAllocationAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub ${ProjectName}-${Environment}-nat3-port-allocation-error
-      AlarmDescription: NAT Gateway 3 is failing to allocate ports
-      Namespace: AWS/NATGateway
-      MetricName: ErrorPortAllocation
-      Dimensions:
-        - Name: NatGatewayId
-          Value: !ImportValue
-            Fn::Sub: ${ProjectName}-${Environment}-NatGateway3Id
-      Statistic: Sum
-      Period: 60
-      EvaluationPeriods: 3
-      Threshold: 0
-      ComparisonOperator: GreaterThanThreshold
-      TreatMissingData: notBreaching
-      AlarmActions:
-        - !Ref AlertSNSTopic
 
   NATGateway1PacketsDropAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -690,8 +671,7 @@ Resources:
               Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
             - !ImportValue
               Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
-            - !ImportValue
-              Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+
       RotationRules:
         AutomaticallyAfterDays: 30
         Duration: 2h

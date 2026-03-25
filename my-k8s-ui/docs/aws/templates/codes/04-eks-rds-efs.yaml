@@ -1,5 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'EKS Infrastructure - EKS Cluster, EFS, RDS PostgreSQL'
+Description: >
+  EKS Cluster(2AZ) + Managed Node Groups + EFS + RDS Aurora PostgreSQL.
+  Node groups:
+    system-mng : Fixed 2 nodes (1 per AZ). Runs management pods only.
+                 Taint: role=system:NoSchedule. スケールしない。
+    (Karpenter provisions all workload nodes dynamically via NodePool)
 
 Parameters:
   ProjectName:
@@ -20,12 +25,6 @@ Parameters:
   DBUsername:
     Type: String
     Default: appuser
-  DBAllocatedStorage:
-    Type: Number
-    Default: 100
-  DBBackupRetentionDays:
-    Type: Number
-    Default: 14
 
 Resources:
 
@@ -46,13 +45,9 @@ Resources:
           - !ImportValue
             Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
           - !ImportValue
-            Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
-          - !ImportValue
             Fn::Sub: ${ProjectName}-${Environment}-PublicSubnet1Id
           - !ImportValue
             Fn::Sub: ${ProjectName}-${Environment}-PublicSubnet2Id
-          - !ImportValue
-            Fn::Sub: ${ProjectName}-${Environment}-PublicSubnet3Id
         SecurityGroupIds:
           - !ImportValue
             Fn::Sub: ${ProjectName}-${Environment}-EKSClusterSecurityGroupId
@@ -73,8 +68,7 @@ Resources:
         - Provider:
             KeyArn: !ImportValue
               Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
-          Resources:
-            - secrets
+          Resources: [secrets]
       AccessConfig:
         AuthenticationMode: API_AND_CONFIG_MAP
         BootstrapClusterCreatorAdminPermissions: true
@@ -98,7 +92,7 @@ Resources:
 
   CoreDNSAddon:
     Type: AWS::EKS::Addon
-    DependsOn: VPCCNIAddon
+    DependsOn: SystemManagedNodeGroup
     Properties:
       ClusterName: !Ref EKSCluster
       AddonName: coredns
@@ -147,16 +141,24 @@ Resources:
           Namespace: kube-system
 
   # ============================================================
-  # Karpenter System Node Group (bootstrap nodes for Karpenter itself)
+  # System Managed Node Group
+  # Purpose  : 管理系Pod専用 (Karpenter, ArgoCD, ESO, ALB-ctrl,
+  #            cert-manager, CW Agent 等)
+  # Replicas : 初期1台。性能不足時のみ2台へ拡張 (手動 MaxSize: 2)
+  #             Karpenter workerとは独立 — Karpenterが起動するEC2と共用しない
+  # Taint    : CriticalAddonsOnly=true:NoSchedule
+  #            → 管理系Pod (Karpenter,ArgoCD,ESO,ALB-ctrl等) だけToleration持つ
+  #            → Railsワークロードは来ない → Karpenter NodePoolへ流れる
   # ============================================================
-  KarpenterNodeGroup:
+  SystemManagedNodeGroup:
     Type: AWS::EKS::Nodegroup
     DependsOn:
-      - EKSCluster
-      - CoreDNSAddon
+      - VPCCNIAddon
+      - KubeProxyAddon
+      - PodIdentityAddon
     Properties:
       ClusterName: !Ref EKSCluster
-      NodegroupName: !Sub ${ProjectName}-${Environment}-karpenter-system
+      NodegroupName: !Sub ${ProjectName}-${Environment}-system
       NodeRole: !ImportValue
         Fn::Sub: ${ProjectName}-${Environment}-EKSNodeRoleArn
       Subnets:
@@ -164,30 +166,31 @@ Resources:
           Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
         - !ImportValue
           Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
-        - !ImportValue
-          Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
+      # m6i.large: 2vCPU 8GiB — 管理podには十分
       InstanceTypes:
         - m6i.large
-        - m6a.large
       ScalingConfig:
-        MinSize: 2
-        MaxSize: 4
-        DesiredSize: 2
+        MinSize: 1
+        MaxSize: 2      # 通常1台、性能不足時は2台に変更可
+        DesiredSize: 1
       AmiType: AL2023_x86_64_STANDARD
       DiskSize: 50
       Labels:
-        role: karpenter-system
-        managed-by: nodegroup
+        role: system
+        node-type: managed
+        karpenter.sh/do-not-disrupt: "true"
       Taints:
+        # 標準taint名: 管理系pod(Karpenter/ArgoCD/ESO等)だけToleration持つ
         - Key: CriticalAddonsOnly
+          Value: "true"
           Effect: NO_SCHEDULE
       UpdateConfig:
-        MaxUnavailablePercentage: 50
+        MaxUnavailable: 1   # 1台ずつローリングアップデート
       Tags:
-        Name: !Sub ${ProjectName}-${Environment}-karpenter-system
+        Name: !Sub ${ProjectName}-${Environment}-system-node
 
   # ============================================================
-  # EFS File System
+  # EFS File System (Multi-AZ — Rails PV用, EBSは使わない)
   # ============================================================
   EFSFileSystem:
     Type: AWS::EFS::FileSystem
@@ -226,6 +229,7 @@ Resources:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-efs
 
+  # Mount targets — 2AZのみ
   EFSMountTarget1:
     Type: AWS::EFS::MountTarget
     Properties:
@@ -246,18 +250,25 @@ Resources:
         - !ImportValue
           Fn::Sub: ${ProjectName}-${Environment}-EFSSecurityGroupId
 
-  EFSMountTarget3:
-    Type: AWS::EFS::MountTarget
+  # EFS Access Points (gui / app / shared)
+  EFSGUIAccessPoint:
+    Type: AWS::EFS::AccessPoint
     Properties:
       FileSystemId: !Ref EFSFileSystem
-      SubnetId: !ImportValue
-        Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet3Id
-      SecurityGroups:
-        - !ImportValue
-          Fn::Sub: ${ProjectName}-${Environment}-EFSSecurityGroupId
+      PosixUser:
+        Uid: '1000'
+        Gid: '1000'
+      RootDirectory:
+        CreationInfo:
+          OwnerUid: '1000'
+          OwnerGid: '1000'
+          Permissions: '755'
+        Path: /gui-data
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-efs-gui-ap
 
-  # EFS Access Point for application
-  EFSAccessPoint:
+  EFSAppAccessPoint:
     Type: AWS::EFS::AccessPoint
     Properties:
       FileSystemId: !Ref EFSFileSystem
@@ -274,51 +285,73 @@ Resources:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-efs-app-ap
 
+  EFSSharedAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser:
+        Uid: '1000'
+        Gid: '1000'
+      RootDirectory:
+        CreationInfo:
+          OwnerUid: '1000'
+          OwnerGid: '1000'
+          Permissions: '755'
+        Path: /shared
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-efs-shared-ap
+
   # ============================================================
-  # RDS PostgreSQL
+  # RDS Aurora PostgreSQL
   # ============================================================
   RDSSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
       DBSubnetGroupName: !Sub ${ProjectName}-${Environment}-db-subnet-group
-      DBSubnetGroupDescription: Subnet group for RDS PostgreSQL
+      DBSubnetGroupDescription: 2AZ subnet group for RDS Aurora
       SubnetIds:
         - !ImportValue
           Fn::Sub: ${ProjectName}-${Environment}-DBSubnet1Id
         - !ImportValue
           Fn::Sub: ${ProjectName}-${Environment}-DBSubnet2Id
-        - !ImportValue
-          Fn::Sub: ${ProjectName}-${Environment}-DBSubnet3Id
-      Tags:
-        - Key: Name
-          Value: !Sub ${ProjectName}-${Environment}-db-subnet-group
+
+  RDSClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      DBClusterParameterGroupName: !Sub ${ProjectName}-${Environment}-aurora-pg-params
+      Description: Aurora PostgreSQL 16 cluster params
+      Family: aurora-postgresql16
+      Parameters:
+        log_connections: '1'
+        log_disconnections: '1'
+        shared_preload_libraries: 'pg_stat_statements'
+        rds.force_ssl: '1'
 
   RDSParameterGroup:
     Type: AWS::RDS::DBParameterGroup
     Properties:
       DBParameterGroupName: !Sub ${ProjectName}-${Environment}-pg-params
-      Description: PostgreSQL parameter group
-      Family: postgres16
+      Description: PostgreSQL 16 instance params
+      Family: aurora-postgresql16
       Parameters:
-        log_connections: '1'
-        log_disconnections: '1'
-        log_duration: '0'
         log_min_duration_statement: '1000'
         log_statement: 'ddl'
-        shared_preload_libraries: 'pg_stat_statements'
-        pg_stat_statements.track: 'all'
-        ssl: '1'
-        password_encryption: 'scram-sha-256'
         max_connections: '200'
         work_mem: '16384'
-        maintenance_work_mem: '524288'
-        wal_level: 'logical'
-      Tags:
-        - Key: Name
-          Value: !Sub ${ProjectName}-${Environment}-pg-params
 
-  # DB credentials are centrally managed in 06-observability.yaml (RDSMasterSecret).
-  # The RDS cluster resolves credentials from that cross-stack export.
+  RDSMasterSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ProjectName}/${Environment}/rds/master-credentials
+      Description: RDS Aurora PostgreSQL master credentials
+      KmsKeyId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-SecretsManagerKMSKeyArn
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"${DBUsername}","dbname":"${DBName}"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
 
   RDSCluster:
     Type: AWS::RDS::DBCluster
@@ -331,12 +364,10 @@ Resources:
       DatabaseName: !Ref DBName
       MasterUsername: !Sub
         - '{{resolve:secretsmanager:${SecretArn}:SecretString:username}}'
-        - SecretArn: !ImportValue
-            Fn::Sub: ${ProjectName}-${Environment}-RDSMasterSecretArn
+        - SecretArn: !Ref RDSMasterSecret
       MasterUserPassword: !Sub
         - '{{resolve:secretsmanager:${SecretArn}:SecretString:password}}'
-        - SecretArn: !ImportValue
-            Fn::Sub: ${ProjectName}-${Environment}-RDSMasterSecretArn
+        - SecretArn: !Ref RDSMasterSecret
       DBSubnetGroupName: !Ref RDSSubnetGroup
       VpcSecurityGroupIds:
         - !ImportValue
@@ -345,31 +376,12 @@ Resources:
         Fn::Sub: ${ProjectName}-${Environment}-RDSKMSKeyArn
       StorageEncrypted: true
       EnableIAMDatabaseAuthentication: true
-      BackupRetentionPeriod: !Ref DBBackupRetentionDays
+      BackupRetentionPeriod: 14
       PreferredBackupWindow: 17:00-18:00
       PreferredMaintenanceWindow: Mon:18:00-Mon:19:00
       DeletionProtection: true
-      EnableCloudwatchLogsExports:
-        - postgresql
+      EnableCloudwatchLogsExports: [postgresql]
       DBClusterParameterGroupName: !Ref RDSClusterParameterGroup
-      Tags:
-        - Key: Name
-          Value: !Sub ${ProjectName}-${Environment}-postgres
-
-  RDSClusterParameterGroup:
-    Type: AWS::RDS::DBClusterParameterGroup
-    Properties:
-      DBClusterParameterGroupName: !Sub ${ProjectName}-${Environment}-aurora-pg-cluster-params
-      Description: Aurora PostgreSQL cluster parameter group
-      Family: aurora-postgresql16
-      Parameters:
-        log_connections: '1'
-        log_disconnections: '1'
-        shared_preload_libraries: 'pg_stat_statements'
-        rds.force_ssl: '1'
-      Tags:
-        - Key: Name
-          Value: !Sub ${ProjectName}-${Environment}-aurora-cluster-params
 
   RDSWriterInstance:
     Type: AWS::RDS::DBInstance
@@ -381,15 +393,13 @@ Resources:
       PubliclyAccessible: false
       DBParameterGroupName: !Ref RDSParameterGroup
       MonitoringInterval: 60
-      MonitoringRoleArn: !GetAtt RDSMonitoringRole.Arn
+      MonitoringRoleArn: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-RDSMonitoringRoleArn
       EnablePerformanceInsights: true
       PerformanceInsightsKMSKeyId: !ImportValue
         Fn::Sub: ${ProjectName}-${Environment}-RDSKMSKeyArn
       PerformanceInsightsRetentionPeriod: 31
       AutoMinorVersionUpgrade: true
-      Tags:
-        - Key: Name
-          Value: !Sub ${ProjectName}-${Environment}-postgres-writer
 
   RDSReaderInstance:
     Type: AWS::RDS::DBInstance
@@ -401,82 +411,81 @@ Resources:
       PubliclyAccessible: false
       DBParameterGroupName: !Ref RDSParameterGroup
       MonitoringInterval: 60
-      MonitoringRoleArn: !GetAtt RDSMonitoringRole.Arn
+      MonitoringRoleArn: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-RDSMonitoringRoleArn
       EnablePerformanceInsights: true
       PerformanceInsightsKMSKeyId: !ImportValue
         Fn::Sub: ${ProjectName}-${Environment}-RDSKMSKeyArn
       PerformanceInsightsRetentionPeriod: 31
       AutoMinorVersionUpgrade: true
-      Tags:
-        - Key: Name
-          Value: !Sub ${ProjectName}-${Environment}-postgres-reader
 
-  RDSMonitoringRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub ${ProjectName}-${Environment}-rds-monitoring-role
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: monitoring.rds.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
-
-  # Update secret with endpoint info
-  DBSecretAttachment:
+  RDSSecretAttachment:
     Type: AWS::SecretsManager::SecretTargetAttachment
     Properties:
-      SecretId: !ImportValue
-        Fn::Sub: ${ProjectName}-${Environment}-RDSMasterSecretArn
+      SecretId: !Ref RDSMasterSecret
       TargetId: !Ref RDSCluster
       TargetType: AWS::RDS::DBCluster
+
+  RDSSecretRotation:
+    Type: AWS::SecretsManager::RotationSchedule
+    Properties:
+      SecretId: !Ref RDSMasterSecret
+      HostedRotationLambda:
+        RotationType: PostgreSQLSingleUser
+        RotationLambdaName: !Sub ${ProjectName}-${Environment}-rds-rotation
+        VpcSecurityGroupIds: !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-RDSSecurityGroupId
+        VpcSubnetIds: !Join
+          - ','
+          - - !ImportValue
+              Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet1Id
+            - !ImportValue
+              Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnet2Id
+      RotationRules:
+        AutomaticallyAfterDays: 30
 
 Outputs:
   EKSClusterName:
     Value: !Ref EKSCluster
     Export:
       Name: !Sub ${ProjectName}-${Environment}-EKSClusterName
-
   EKSClusterArn:
     Value: !GetAtt EKSCluster.Arn
     Export:
       Name: !Sub ${ProjectName}-${Environment}-EKSClusterArn
-
   EKSClusterEndpoint:
     Value: !GetAtt EKSCluster.Endpoint
     Export:
       Name: !Sub ${ProjectName}-${Environment}-EKSClusterEndpoint
-
+  SystemManagedNodeGroupName:
+    Value: !Ref SystemManagedNodeGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-SystemManagedNodeGroupName
   EFSFileSystemId:
     Value: !Ref EFSFileSystem
     Export:
       Name: !Sub ${ProjectName}-${Environment}-EFSFileSystemId
-
-  EFSAccessPointId:
-    Value: !Ref EFSAccessPoint
+  EFSGUIAccessPointId:
+    Value: !Ref EFSGUIAccessPoint
     Export:
-      Name: !Sub ${ProjectName}-${Environment}-EFSAccessPointId
-
+      Name: !Sub ${ProjectName}-${Environment}-EFSGUIAccessPointId
+  EFSAppAccessPointId:
+    Value: !Ref EFSAppAccessPoint
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EFSAppAccessPointId
+  EFSSharedAccessPointId:
+    Value: !Ref EFSSharedAccessPoint
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EFSSharedAccessPointId
   RDSClusterEndpoint:
     Value: !GetAtt RDSCluster.Endpoint.Address
     Export:
       Name: !Sub ${ProjectName}-${Environment}-RDSClusterEndpoint
-
   RDSClusterReaderEndpoint:
     Value: !GetAtt RDSCluster.ReadEndpoint.Address
     Export:
       Name: !Sub ${ProjectName}-${Environment}-RDSClusterReaderEndpoint
-
-  RDSClusterPort:
-    Value: !GetAtt RDSCluster.Endpoint.Port
+  RDSMasterSecretArn:
+    Value: !Ref RDSMasterSecret
     Export:
-      Name: !Sub ${ProjectName}-${Environment}-RDSClusterPort
-
-  DBSecretArn:
-    Value: !ImportValue
-      Fn::Sub: ${ProjectName}-${Environment}-RDSMasterSecretArn
-    Export:
-      Name: !Sub ${ProjectName}-${Environment}-DBSecretArn
+      Name: !Sub ${ProjectName}-${Environment}-RDSMasterSecretArn
