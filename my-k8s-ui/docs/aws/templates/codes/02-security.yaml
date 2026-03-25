@@ -203,6 +203,74 @@ Resources:
       IpProtocol: -1
       CidrIp: 0.0.0.0/0
 
+
+  # ============================================================
+  # NGINX Ingress Controller Security Group
+  # ALB(internet-facing) → NGINX Ingress → my-gui/my-app pods
+  # NGINX は ALB Target として動作し、URLパス書き換えを行う
+  # ============================================================
+  NginxIngressSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProjectName}-${Environment}-nginx-ingress-sg
+      GroupDescription: Security group for NGINX Ingress Controller pods
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-${Environment}-VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-nginx-ingress-sg
+
+  # ALB → NGINX Ingress (HTTP/HTTPS NodePort)
+  ALBToNginxIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NginxIngressSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Description: ALB to NGINX HTTP
+
+  ALBToNginxIngressHTTPS:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NginxIngressSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Description: ALB to NGINX HTTPS
+
+  # NGINX → workload pods (any port in cluster range)
+  NginxToNodeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EKSNodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 1025
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref NginxIngressSecurityGroup
+      Description: NGINX Ingress to node pods
+
+  NginxEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NginxIngressSecurityGroup
+      IpProtocol: -1
+      CidrIp: 0.0.0.0/0
+      Description: Allow all outbound
+
+  # SSH sidecar (rsync) between pods: port 2222
+  PodSSHSidecarIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EKSNodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2222
+      ToPort: 2222
+      SourceSecurityGroupId: !Ref EKSNodeSecurityGroup
+      Description: Pod-to-pod SSH for rsync sidecar (cert-manager managed keys)
+
   # ============================================================
   # WAF v2
   # ============================================================
@@ -377,6 +445,11 @@ Outputs:
     Value: !Ref EFSSecurityGroup
     Export:
       Name: !Sub ${ProjectName}-${Environment}-EFSSecurityGroupId
+
+  NginxIngressSecurityGroupId:
+    Value: !Ref NginxIngressSecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-NginxIngressSecurityGroupId
 
   WAFWebACLArn:
     Value: !GetAtt WAFWebACL.Arn

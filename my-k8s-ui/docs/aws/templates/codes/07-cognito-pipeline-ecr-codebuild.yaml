@@ -337,10 +337,11 @@ Resources:
   # ============================================================
   # ECR Repository
   # ============================================================
-  ECRRepository:
+  # my-app: サービス毎テナント Karpenter workload
+  ECRMyAppRepository:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Ref ECRRepositoryName
+      RepositoryName: !Sub ${ECRRepositoryName}-app
       ImageScanningConfiguration:
         ScanOnPush: true
       EncryptionConfiguration:
@@ -381,10 +382,11 @@ Resources:
           Value: !Sub ${ProjectName}-${Environment}-ecr
 
   # GUI frontend ECR (React/Amplify build artifacts)
-  ECRFrontendRepository:
+  # my-gui: ユーザ毎テナント Karpenter workload
+  ECRMyGuiRepository:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Sub ${ECRRepositoryName}-frontend
+      RepositoryName: !Sub ${ECRRepositoryName}-gui
       ImageScanningConfiguration:
         ScanOnPush: true
       EncryptionConfiguration:
@@ -422,6 +424,51 @@ Resources:
           }
 
   # ============================================================
+
+  # my-mng: オーケストレータ 常駐サービス system MNG
+  ECRMyMngRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${ECRRepositoryName}-mng
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 20 tagged images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["v","sha-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": {"type": "expire"}
+              },
+              {
+                "rulePriority": 2,
+                "description": "Expire untagged after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": {"type": "expire"}
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-ecr-mng
+
   # CodeBuild — GitHub → ECR + Helm package push
   # ============================================================
   CodeBuildLogGroup:
@@ -463,8 +510,9 @@ Resources:
                   - ecr:UploadLayerPart
                   - ecr:CompleteLayerUpload
                 Resource:
-                  - !GetAtt ECRRepository.Arn
-                  - !GetAtt ECRFrontendRepository.Arn
+                  - !GetAtt ECRMyAppRepository.Arn
+                  - !GetAtt ECRMyGuiRepository.Arn
+                  - !GetAtt ECRMyMngRepository.Arn
               # CloudWatch logs
               - Effect: Allow
                 Action:
@@ -534,6 +582,51 @@ Resources:
       SecretString: |
         {"github_token": "PLACEHOLDER_SET_MANUALLY", "github_user": "PLACEHOLDER"}
 
+
+  # my-mng: オーケストレータ 常駐サービス system MNG
+  ECRMyMngRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${ECRRepositoryName}-mng
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 20 tagged images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["v","sha-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": {"type": "expire"}
+              },
+              {
+                "rulePriority": 2,
+                "description": "Expire untagged after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": {"type": "expire"}
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-ecr-mng
+
   # CodeBuild Project — Rails app build
   CodeBuildProjectApp:
     Type: AWS::CodeBuild::Project
@@ -567,10 +660,12 @@ Resources:
             Value: !Ref AWS::AccountId
           - Name: AWS_REGION
             Value: !Ref AWS::Region
-          - Name: ECR_REPO_URI
-            Value: !GetAtt ECRRepository.RepositoryUri
-          - Name: ECR_FRONTEND_URI
-            Value: !GetAtt ECRFrontendRepository.RepositoryUri
+          - Name: ECR_MNG_URI
+            Value: !GetAtt ECRMyMngRepository.RepositoryUri
+          - Name: ECR_GUI_URI
+            Value: !GetAtt ECRMyGuiRepository.RepositoryUri
+          - Name: ECR_APP_URI
+            Value: !GetAtt ECRMyAppRepository.RepositoryUri
           - Name: HELM_REPO_OWNER
             Value: !Ref GitHubOwner
           - Name: HELM_REPO_NAME
@@ -598,6 +693,51 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-app-build
+
+
+  # my-mng: オーケストレータ 常駐サービス system MNG
+  ECRMyMngRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${ECRRepositoryName}-mng
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !ImportValue
+          Fn::Sub: ${ProjectName}-${Environment}-EKSSecretsKMSKeyArn
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 20 tagged images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["v","sha-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": {"type": "expire"}
+              },
+              {
+                "rulePriority": 2,
+                "description": "Expire untagged after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": {"type": "expire"}
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-ecr-mng
 
   # CodeBuild Project — Frontend (React/Amplify) build
   CodeBuildProjectFrontend:
@@ -632,8 +772,12 @@ Resources:
             Value: !Ref AWS::AccountId
           - Name: AWS_REGION
             Value: !Ref AWS::Region
-          - Name: ECR_FRONTEND_URI
-            Value: !GetAtt ECRFrontendRepository.RepositoryUri
+          - Name: ECR_MNG_URI
+            Value: !GetAtt ECRMyMngRepository.RepositoryUri
+          - Name: ECR_GUI_URI
+            Value: !GetAtt ECRMyGuiRepository.RepositoryUri
+          - Name: ECR_APP_URI
+            Value: !GetAtt ECRMyAppRepository.RepositoryUri
           - Name: GITHUB_SECRET_ARN
             Value: !Ref GitHubTokenSecret
       LogsConfig:
@@ -770,15 +914,20 @@ Outputs:
     Export:
       Name: !Sub ${ProjectName}-${Environment}-CognitoEventQueueArn
 
-  ECRRepositoryUri:
-    Value: !GetAtt ECRRepository.RepositoryUri
+  ECRMyMngRepositoryUri:
+    Value: !GetAtt ECRMyMngRepository.RepositoryUri
     Export:
-      Name: !Sub ${ProjectName}-${Environment}-ECRRepositoryUri
+      Name: !Sub ${ProjectName}-${Environment}-ECRMyMngRepositoryUri
 
-  ECRFrontendRepositoryUri:
-    Value: !GetAtt ECRFrontendRepository.RepositoryUri
+  ECRMyGuiRepositoryUri:
+    Value: !GetAtt ECRMyGuiRepository.RepositoryUri
     Export:
-      Name: !Sub ${ProjectName}-${Environment}-ECRFrontendRepositoryUri
+      Name: !Sub ${ProjectName}-${Environment}-ECRMyGuiRepositoryUri
+
+  ECRMyAppRepositoryUri:
+    Value: !GetAtt ECRMyAppRepository.RepositoryUri
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ECRMyAppRepositoryUri
 
   CodeBuildProjectAppName:
     Value: !Ref CodeBuildProjectApp

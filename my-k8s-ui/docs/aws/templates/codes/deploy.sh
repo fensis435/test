@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # EKS Full-Stack Deployment Script  v4
-# 2AZ構成 / System MNG (初期1台) + Karpenter worker分離 / 全Pod Identity登録
+# 2AZ構成 / System MNG (初期1台: my-mng常駐) + Karpenter worker分離 (my-gui/my-app テナント)
 # =============================================================================
 set -euo pipefail
 IFS=$'\n\t'
@@ -33,7 +33,7 @@ GITHUB_REPO="${GITHUB_REPO:-}"
 GITHUB_BRANCH="${GITHUB_BRANCH:-main}"
 GITHUB_HELM_REPO="${GITHUB_HELM_REPO:-helm-charts}"
 GITHUB_CONNECTION_ARN="${GITHUB_CONNECTION_ARN:-}"
-ECR_REPO_NAME="${ECR_REPO_NAME:-rails-app}"
+ECR_REPO_NAME="${ECR_REPO_NAME:-my-app}"   # ECRリポジトリ prefix (my-app-mng, my-app-gui, my-app-app)
 
 CLUSTER_NAME="${PROJECT_NAME}-${ENVIRONMENT}"
 STACK_PREFIX="${PROJECT_NAME}-${ENVIRONMENT}"
@@ -185,6 +185,7 @@ setup_helm_repos() {
   helm repo add metrics-server    https://kubernetes-sigs.github.io/metrics-server
   helm repo add external-secrets  https://charts.external-secrets.io
   helm repo add jetstack          https://charts.jetstack.io
+  helm repo add ingress-nginx     https://kubernetes.github.io/ingress-nginx
   helm repo update
   log "Helm repos configured"
 }
@@ -261,16 +262,16 @@ spec:
     ManagedBy: karpenter
     NodeType: workload
 ---
-# デフォルトワークロード用NodePool (Railsアプリ、計算Job等)
+# my-gui / my-app 用NodePool (テナント分離, spot/on-demand)
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
-  name: workload
+  name: tenant-workload
 spec:
   template:
     metadata:
       labels:
-        role: workload
+        role: tenant-workload
         node-type: karpenter
     spec:
       nodeClassRef:
@@ -303,11 +304,11 @@ spec:
     consolidationPolicy: WhenEmptyOrUnderutilized
     consolidateAfter: 1m
 ---
-# 計算集約型Job用NodePool (多量Pod生成時に使用)
+# my-app 計算集約型Pod用NodePool (計算量に応じてPod数変動)
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
-  name: compute
+  name: my-app-compute
 spec:
   template:
     metadata:
@@ -331,7 +332,7 @@ spec:
           values: [spot]   # 計算Jobはspot優先
       taints:
         - key: workload-type
-          value: compute
+          value: my-app-compute
           effect: NoSchedule
       expireAfter: 2h   # 短命
       terminationGracePeriod: 10m
@@ -659,14 +660,20 @@ configure_pod_identities() {
   pia "kube-system"       "ebs-csi-controller-sa"             "${ebs_role}"
   pia "kube-system"       "efs-csi-controller-sa"             "${efs_role}"
 
-  info "=== Rails系 Pod (Karpenter workload nodes上) ==="
-  # Rails サーバ用 (gui/app namespace の rails-*-sa)
-  # ※ 新namespace作成時は deploy_rails_namespace() で追加
-  kubectl create namespace rails-system --dry-run=client -o yaml | kubectl apply -f -
-  pia "rails-system"      "rails-gui-sa"                      "${rails_role}"
-  pia "rails-system"      "rails-app-sa"                      "${rails_role}"
-  # ArgoCD Bridge (Rails JobがArgoCD APIを呼ぶ用)
-  pia "rails-system"      "rails-bridge-sa"                   "${bridge_role}"
+  info "=== my-mng (system MNG常駐オーケストレータ) ==="
+  # my-mng は system MNG上で動く
+  kubectl create namespace my-mng --dry-run=client -o yaml | kubectl apply -f -
+  pia "my-mng" "my-mng-sa" "${rails_role}"
+
+  info "=== NGINX Ingress Controller (system MNG上) ==="
+  # NGINX Ingress SA — Pod Identityは不要だが namespace 確認のため登録
+  kubectl create namespace ingress-nginx --dry-run=client -o yaml | kubectl apply -f -
+  # ingress-nginx は AWS API を直接呼ばないため Pod Identity 不要
+  info "  ingress-nginx: Pod Identity不要 (AWS API呼び出しなし)"
+
+  info "=== my-gui / my-app (Karpenter workload nodes上) ==="
+  # テナントnamespace作成時は deploy_tenant_namespace() で追加
+  # deploy_tenant_namespace gui <uuid> / deploy_tenant_namespace app <uuid>
 
   log "全Pod Identity登録完了"
 }
@@ -711,7 +718,10 @@ configure_argocd_rails() {
   efs_id=$(get_output    "${STACK_PREFIX}-eks-rds-efs"     "EFSFileSystemId")
   db_secret=$(get_output "${STACK_PREFIX}-eks-rds-efs"     "RDSMasterSecretArn")
   sqs_url=$(get_output   "${STACK_PREFIX}-cognito-pipeline" "CognitoEventQueueUrl")
-  ecr_uri=$(get_output   "${STACK_PREFIX}-cognito-pipeline" "ECRRepositoryUri")
+  ecr_mng_uri=$(get_output "${STACK_PREFIX}-cognito-pipeline" "ECRMyMngRepositoryUri")
+  ecr_gui_uri=$(get_output "${STACK_PREFIX}-cognito-pipeline" "ECRMyGuiRepositoryUri")
+  ecr_app_uri=$(get_output "${STACK_PREFIX}-cognito-pipeline" "ECRMyAppRepositoryUri")
+  ecr_uri="${ecr_mng_uri}"  # 後方互換
 
   cat <<EOF | kubectl apply -f -
 apiVersion: v1
@@ -733,15 +743,42 @@ data:
   EFS_FILE_SYSTEM_ID:     "${efs_id}"
   DB_SECRET_ARN:          "${db_secret}"
   COGNITO_SQS_QUEUE_URL:  "${sqs_url}"
-  ECR_REPOSITORY_URI:     "${ecr_uri}"
+  ECR_MNG_REPOSITORY_URI:  "${ecr_mng_uri}"
+  ECR_GUI_REPOSITORY_URI:  "${ecr_gui_uri}"
+  ECR_APP_REPOSITORY_URI:  "${ecr_app_uri}"
+  ECR_REPOSITORY_URI:      "${ecr_uri}"
   HELM_REPO_URL:          "https://${GITHUB_OWNER}.github.io/${GITHUB_HELM_REPO}"
   ARGOCD_SERVER:          "argocd-server.argocd.svc.cluster.local:443"
-  ARGOCD_TOKEN_SECRET_ARN: "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:${PROJECT_NAME}/${ENVIRONMENT}/argocd/rails-deployer-token"
+  ARGOCD_TOKEN_SECRET_ARN: "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:${PROJECT_NAME}/${ENVIRONMENT}/argocd/mng-deployer-token"
 EOF
 
   # Rails workload AppProject + Helm repo secret
   sed "s|HELM_REPO_URL_PLACEHOLDER|https://${GITHUB_OWNER}.github.io/${GITHUB_HELM_REPO}|g" \
     "${ARGOCD_DIR}/rails-apps.yaml" | kubectl apply -f -
+
+  # my-mng namespace cluster-config コピー
+  kubectl create namespace my-mng --dry-run=client -o yaml | kubectl apply -f -
+  kubectl get configmap cluster-config -n argocd -o json \
+    | jq ".metadata.namespace=\"my-mng\" | del(.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.metadata.annotations)" \
+    | kubectl apply -f - 2>/dev/null || true
+
+  # my-mng Helm values に ACM/WAF ARN を注入 (ArgoCD ApplicationのHelm parametersで管理)
+  local cert_arn waf_arn
+  cert_arn=$(get_output "${STACK_PREFIX}-base"     "ACMCertificateArn")
+  waf_arn=$(get_output  "${STACK_PREFIX}-security" "WAFWebACLArn")
+
+  cat <<MYVALUES | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-mng-aws-config
+  namespace: argocd
+data:
+  # ArgoCD ApplicationがHelm parametersで参照
+  ACM_CERT_ARN: "${cert_arn}"
+  WAF_ARN: "${waf_arn}"
+  DOMAIN_NAME: "${DOMAIN_NAME}"
+MYVALUES
 
   # Platform apps (ESO/cert-manager/cluster-issuers)
   sed "s|ARGOCD_REPO_URL_PLACEHOLDER|${ARGOCD_REPO_URL}|g" \
@@ -754,6 +791,7 @@ EOF
     --secret-id "${PROJECT_NAME}/${ENVIRONMENT}/argocd/admin-password" \
     --query SecretString --output text --region "${AWS_REGION}")
 
+  local argocd_jwt
   local argocd_jwt
   argocd_jwt=$(curl -sk "https://argocd.${DOMAIN_NAME}/api/v1/session" \
     -d "{\"username\":\"admin\",\"password\":\"${argocd_pw}\"}" \
@@ -778,8 +816,8 @@ EOF
     log "ArgoCD rails-deployer token → Secrets Manager"
   else
     warn "ArgoCD token 自動生成失敗 — 手動設定:"
-    warn "  argocd account generate-token --account rails-deployer"
-    warn "  Secret: ${PROJECT_NAME}/${ENVIRONMENT}/argocd/rails-deployer-token"
+    warn "  argocd account generate-token --account mng-deployer"
+    warn "  Secret: ${PROJECT_NAME}/${ENVIRONMENT}/argocd/mng-deployer-token"
   fi
 
   # App-of-Apps root
@@ -875,38 +913,53 @@ verify_deployment() {
   echo "=== StorageClass ==="
   kubectl get storageclass
 
+  echo ""
+  echo "=== NGINX Ingress ==="
+  kubectl get pods -n ingress-nginx 2>/dev/null || true
+  kubectl get svc  -n ingress-nginx 2>/dev/null || true
+
+  echo ""
+  echo "=== ApplicationSets (my-gui/my-app テナント) ==="
+  kubectl get applicationset -n argocd 2>/dev/null || true
+
+  echo ""
+  echo "=== my-mng ==="
+  kubectl get pods -n my-mng 2>/dev/null || true
+
   log "Verification complete"
 }
 
-# ── Namespace準備 (Rails Jobから呼ばれるヘルパー) ─────────────────────────────
-deploy_rails_namespace() {
-  local ns_type="${1}"  # gui | app
-  local ns_id="${2}"
+# ── テナントNamespace準備 (my-mng Jobから呼ばれるヘルパー) ────────────────────
+# my-gui → gui-<uuid>, my-app → app-<uuid> のランダムnamespace作成
+# kubectl apply → ApplicationSet list更新は my-mng側スクリプトで行う
+deploy_tenant_namespace() {
+  local ns_type="${1}"   # gui | app
+  local ns_id="${2}"     # ランダムUUID (my-mngが生成)
   local namespace="${ns_type}-${ns_id}"
-  local rails_role
-  rails_role=$(get_output "${STACK_PREFIX}-iam" "RailsPodRoleArn")
-  local bridge_role
-  bridge_role=$(get_output "${STACK_PREFIX}-iam" "ArgoCDBridgeRoleArn")
-  local sa_name="rails-${ns_type}-sa"
+  local rails_role bridge_role sa_name
 
-  info "Namespace準備: ${namespace}"
+  rails_role=$(get_output  "${STACK_PREFIX}-iam" "RailsPodRoleArn")
+  bridge_role=$(get_output "${STACK_PREFIX}-iam" "ArgoCDBridgeRoleArn")
+  sa_name="${ns_type}-sa"   # gui-sa or app-sa
+
+  info "テナントNamespace作成: ${namespace}"
   kubectl create namespace "${namespace}" --dry-run=client -o yaml | kubectl apply -f -
   kubectl label namespace "${namespace}" \
-    "app.kubernetes.io/managed-by-rails=${ns_type}" \
-    "app.kubernetes.io/ns-type=${ns_type}" \
+    "app.kubernetes.io/managed-by=my-mng" \
+    "app.kubernetes.io/tenant-type=${ns_type}" \
+    "app.kubernetes.io/tenant-id=${ns_id}" \
     --overwrite
 
-  # Pod Identity: RailsのSA + BridgeSA
-  pia "${namespace}" "${sa_name}"         "${rails_role}"
-  pia "${namespace}" "rails-bridge-sa"    "${bridge_role}"
+  # Pod Identity: テナントSA → RailsPodRole
+  pia "${namespace}" "${sa_name}"    "${rails_role}"
 
-  # cluster-config ConfigMapを新namespaceにコピー
+  # cluster-config ConfigMapをテナントnamespaceにコピー
   kubectl get configmap cluster-config -n argocd -o json \
     | jq ".metadata.namespace=\"${namespace}\" \
       | del(.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.metadata.annotations)" \
     | kubectl apply -f -
 
-  log "Namespace ${namespace} ready"
+  log "テナントNamespace ${namespace} ready"
 }
 
 # ── サマリー ──────────────────────────────────────────────────────────────────
@@ -922,16 +975,18 @@ print_summary() {
   ├─────────────────────────────────────────────────────────────────┤
   │  Node構成:                                                      │
   │  ・System MNG: 初期1台 (CriticalAddonsOnly taint)              │
-  │    → Karpenter/ArgoCD/ESO/ALB-ctrl/cert-manager/CW-Agent 等   │
+  │    → my-mng(常駐) / Karpenter/ArgoCD/ESO/ALB-ctrl/NGINX等     │
   │    → 性能不足時のみ手動でDesiredSize=2                          │
-  │  ・Karpenter workload NodePool: 動的オートスケール              │
-  │    → Railsアプリ/計算Job (spot優先)                            │
+  │  ・Karpenter NodePool(tenant-workload): 動的オートスケール      │
+  │    → my-gui(ユーザテナント) / my-app(サービステナント)          │
+  │  ・Karpenter NodePool(my-app-compute): 計算集約型Pod用          │
   ├─────────────────────────────────────────────────────────────────┤
   │  次のステップ:                                                  │
   │  1. GitHub PAT: ${PROJECT_NAME}/${ENVIRONMENT}/github/token    │
   │  2. ArgoCD admin password変更                                   │
   │  3. ArgoCD rails-deployer token確認                             │
   │  4. GitOps repo にマニフェストをpush                            │
+  │  5. my-mng Helm chart の values.yaml に ACM/WAF ARN 設定       │
   └─────────────────────────────────────────────────────────────────┘
 SUMMARY
 }
@@ -993,12 +1048,12 @@ main() {
     cognito-pipeline)     deploy_cognito_pipeline ;;
     pod-identities)       configure_pod_identities ;;
     container-insights)   install_container_insights ;;
-    # Rails Jobから呼ぶ
-    rails-namespace)      deploy_rails_namespace "${2:-gui}" "${3:-default}" ;;
+    # my-mng Jobから呼ぶ
+    tenant-namespace)     deploy_tenant_namespace "${2:-gui}" "${3:-$(uuidgen | tr -d - | head -c 8 | tr A-Z a-z)}" ;;
     *)
       echo "Usage: $0 {deploy|destroy|verify|dns|cert-manager|eso|argocd|karpenter|"
       echo "          vpc-endpoints|observability|cognito-pipeline|pod-identities|"
-      echo "          container-insights|rails-namespace <gui|app> <id>}"
+      echo "          container-insights|tenant-namespace <gui|app> <uuid>}"
       echo ""
       echo "Required env vars:"
       echo "  PROJECT_NAME, ENVIRONMENT, AWS_REGION"

@@ -1,0 +1,481 @@
+{{/* ==========================================================================
+  helm/my-mng/templates/aws-resources.yaml
+  my-mngのAWS連携リソース (コードは既存のため、AWS/ArgoCD/Karpenter連携部分のみ生成)
+
+  my-mng の役割:
+    - サービストップ画面のWebUI
+    - ユーザ/サービス/テナント管理 (DB)
+    - my-gui/my-app の動的 install/uninstall Job (ArgoCD API経由)
+    - Cognito SQSイベント消費 → Rails DBユーザ/RBACテーブル更新
+    - system MNG 上で常駐 (CriticalAddonsOnly toleration必須)
+  ========================================================================== */}}
+
+# ── ServiceAccount (Pod Identity用 — アノテーション不要) ─────────────────────
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: my-mng-sa
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "my-mng.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+automountServiceAccountToken: true
+
+# ── EFS PVC (my-mng共有データ, system MNG上) ──────────────────────────────────
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-mng-efs
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "my-mng.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size | default "10Gi" }}
+
+# ── ExternalSecret: DB Credentials ───────────────────────────────────────────
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: db-credentials
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  target:
+    name: db-credentials
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      data:
+        DB_HOST:      "{{ `{{ .host }}` }}"
+        DB_PORT:      "{{ `{{ .port }}` }}"
+        DB_NAME:      "{{ `{{ .dbname }}` }}"
+        DB_USERNAME:  "{{ `{{ .username }}` }}"
+        DB_PASSWORD:  "{{ `{{ .password }}` }}"
+        DATABASE_URL: "postgresql://{{ `{{ .username }}` }}:{{ `{{ .password }}` }}@{{ `{{ .host }}` }}:{{ `{{ .port }}` }}/{{ `{{ .dbname }}` }}?sslmode=require"
+  data:
+    - secretKey: host
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: host
+    - secretKey: port
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: port
+    - secretKey: dbname
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: dbname
+    - secretKey: username
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: username
+    - secretKey: password
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: password
+
+# ── ExternalSecret: Cognito Config ───────────────────────────────────────────
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: cognito-config
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  refreshInterval: 24h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  target:
+    name: cognito-config
+    creationPolicy: Owner
+  data:
+    - secretKey: COGNITO_USER_POOL_ID
+      remoteRef:
+        key: {{ .Values.secretsManager.cognitoSecretName }}
+        property: user_pool_id
+    - secretKey: COGNITO_CLIENT_ID
+      remoteRef:
+        key: {{ .Values.secretsManager.cognitoSecretName }}
+        property: client_id
+    - secretKey: COGNITO_REGION
+      remoteRef:
+        key: {{ .Values.secretsManager.cognitoSecretName }}
+        property: region
+    - secretKey: COGNITO_JWT_ISSUER
+      remoteRef:
+        key: {{ .Values.secretsManager.cognitoSecretName }}
+        property: jwt_issuer
+
+# ── ExternalSecret: ArgoCD Deployer Token ────────────────────────────────────
+# my-mng Job が ArgoCD API で my-gui/my-app を install/uninstall するためのトークン
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: argocd-deployer-token
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  target:
+    name: argocd-deployer-token
+    creationPolicy: Owner
+  data:
+    - secretKey: token
+      remoteRef:
+        key: {{ .Values.secretsManager.argoCDTokenSecretName }}
+        property: token
+
+# ── RBAC: Leader Election ─────────────────────────────────────────────────────
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: my-mng-leader-election
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["my-mng-leader"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: my-mng-leader-election
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: my-mng-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: my-mng-sa
+    namespace: {{ .Release.Namespace }}
+
+# ── RBAC: ApplicationSet list要素更新 ─────────────────────────────────────────
+# my-mng が ApplicationSet の .spec.generators[0].list.elements を
+# kubectl patch で操作するための権限 (テナント install/uninstall)
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: my-mng-applicationset-manager
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applicationsets", "applications"]
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: my-mng-applicationset-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: my-mng-applicationset-manager
+subjects:
+  - kind: ServiceAccount
+    name: my-mng-sa
+    namespace: {{ .Release.Namespace }}
+
+# ── ALB Ingress (my-mng WebUI エントリポイント) ───────────────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-mng-alb
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.aws.acmCertificateArn }}
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/wafv2-acl-arn: {{ .Values.aws.wafWebAclArn }}
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/success-codes: "200-299"
+    # NGINX Ingress (テナント用) は別のALBルールでNodePortを向く
+    # my-mng自身のトラフィック: ALB直接 → my-mng Service
+spec:
+  ingressClassName: alb
+  rules:
+    - host: {{ .Values.aws.domainName }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: my-mng
+                port:
+                  number: 80
+
+# ── ALB Ingress (NGINX Ingress経由 — テナントトラフィック用) ─────────────────
+# /gui-<uuid>/... パスをNGINX Ingressへ転送
+# NGINX がパスを書き換えて my-gui テナントへ reverse proxy
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-mng-alb-tenant
+  namespace: ingress-nginx
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.aws.acmCertificateArn }}
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/wafv2-acl-arn: {{ .Values.aws.wafWebAclArn }}
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    alb.ingress.kubernetes.io/healthcheck-port: "30080"
+    alb.ingress.kubernetes.io/target-node-labels: role=system
+    # /gui-* パスをNGINXへ
+    alb.ingress.kubernetes.io/conditions.ingress-nginx: >
+      [{"field":"path-pattern","pathPatternConfig":{"values":["/gui-*"]}}]
+spec:
+  ingressClassName: alb
+  rules:
+    - host: {{ .Values.aws.domainName }}
+      http:
+        paths:
+          # /gui-<uuid>/... → NGINX Ingress Controller
+          - path: /gui-
+            pathType: Prefix
+            backend:
+              service:
+                name: ingress-nginx-controller
+                port:
+                  number: 80
+
+# ── ArgoCD sync待機スクリプト (my-mng Jobから呼ぶ) ───────────────────────────
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-mng-argocd-scripts
+  namespace: {{ .Release.Namespace }}
+data:
+  # install: ApplicationSet elements に追加 → Application sync完了まで待機
+  # uninstall: ApplicationSet elements から削除 → Application消滅まで待機
+  tenant-install.sh: |
+    #!/bin/bash
+    # ==========================================================================
+    # テナント install スクリプト
+    # my-mng Job の helm install hook から呼ばれる
+    # 1. kubectl patch で ApplicationSet の elements に追加
+    # 2. ArgoCD Application が Synced+Healthy になるまでポーリング
+    # ==========================================================================
+    set -euo pipefail
+
+    APPSET_NAME="${APPSET_NAME:?}"         # my-gui-tenants or my-app-tenants
+    APP_NAME="${APP_NAME:?}"               # my-gui-<ns> or my-app-<ns>
+    NAMESPACE="${TENANT_NAMESPACE:?}"
+    EXTRA_PARAMS="${EXTRA_PARAMS:-{}}"     # JSON: {"userId":"u-001"} 等
+    ARGOCD_SERVER="${ARGOCD_SERVER:-argocd-server.argocd.svc.cluster.local:443}"
+    POLL_INTERVAL="${POLL_INTERVAL:-5}"
+    TIMEOUT="${TIMEOUT:-300}"
+
+    TOKEN=$(aws secretsmanager get-secret-value \
+      --secret-id "${ARGOCD_TOKEN_SECRET_ARN:?}" \
+      --query SecretString --output text | jq -r '.token')
+
+    echo "[$(date +%T)] Adding namespace=${NAMESPACE} to ApplicationSet ${APPSET_NAME}"
+
+    # ApplicationSet elements に追加 (JSON merge patch)
+    CURRENT=$(kubectl get applicationset "${APPSET_NAME}" -n argocd -o json \
+      | jq '.spec.generators[0].list.elements')
+    NEW_ELEM=$(echo "${EXTRA_PARAMS}" | jq --arg ns "${NAMESPACE}" '. + {namespace: $ns}')
+    UPDATED=$(echo "${CURRENT}" | jq --argjson elem "${NEW_ELEM}" '. + [$elem]')
+
+    kubectl patch applicationset "${APPSET_NAME}" -n argocd \
+      --type=json \
+      -p "[{\"op\":\"replace\",\"path\":\"/spec/generators/0/list/elements\",\"value\":${UPDATED}}]"
+
+    echo "[$(date +%T)] Waiting for Application ${APP_NAME} to be Synced+Healthy..."
+
+    elapsed=0
+    while [[ $elapsed -lt $TIMEOUT ]]; do
+      resp=$(curl -sk -H "Authorization: Bearer ${TOKEN}" \
+        "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME}" 2>/dev/null || echo "{}")
+      sync=$(  echo "$resp" | jq -r '.status.sync.status          // "Unknown"')
+      health=$(echo "$resp" | jq -r '.status.health.status        // "Unknown"')
+      phase=$( echo "$resp" | jq -r '.status.operationState.phase // "Unknown"')
+
+      echo "[$(date +%T)] +${elapsed}s sync=${sync} health=${health} op=${phase}"
+
+      if [[ "${sync}" == "Synced" && "${health}" == "Healthy" ]]; then
+        echo "[$(date +%T)] ✓ ${APP_NAME} ready"
+        exit 0
+      fi
+      if [[ "${phase}" == "Failed" || "${phase}" == "Error" ]]; then
+        echo "[$(date +%T)] ✗ $(echo "$resp" | jq -r '.status.operationState.message // "error"')"
+        exit 1
+      fi
+
+      sleep "${POLL_INTERVAL}"
+      elapsed=$((elapsed + POLL_INTERVAL))
+    done
+    echo "[$(date +%T)] ✗ Timeout ${TIMEOUT}s"
+    exit 1
+
+  tenant-uninstall.sh: |
+    #!/bin/bash
+    # ==========================================================================
+    # テナント uninstall スクリプト
+    # 1. kubectl patch で ApplicationSet の elements から削除
+    # 2. Application が 404 になるまでポーリング
+    # ==========================================================================
+    set -euo pipefail
+
+    APPSET_NAME="${APPSET_NAME:?}"
+    APP_NAME="${APP_NAME:?}"
+    NAMESPACE="${TENANT_NAMESPACE:?}"
+    ARGOCD_SERVER="${ARGOCD_SERVER:-argocd-server.argocd.svc.cluster.local:443}"
+    POLL_INTERVAL="${POLL_INTERVAL:-5}"
+    TIMEOUT="${TIMEOUT:-300}"
+
+    TOKEN=$(aws secretsmanager get-secret-value \
+      --secret-id "${ARGOCD_TOKEN_SECRET_ARN:?}" \
+      --query SecretString --output text | jq -r '.token')
+
+    echo "[$(date +%T)] Removing namespace=${NAMESPACE} from ApplicationSet ${APPSET_NAME}"
+
+    CURRENT=$(kubectl get applicationset "${APPSET_NAME}" -n argocd -o json \
+      | jq '.spec.generators[0].list.elements')
+    UPDATED=$(echo "${CURRENT}" | jq --arg ns "${NAMESPACE}" '[.[] | select(.namespace != $ns)]')
+
+    kubectl patch applicationset "${APPSET_NAME}" -n argocd \
+      --type=json \
+      -p "[{\"op\":\"replace\",\"path\":\"/spec/generators/0/list/elements\",\"value\":${UPDATED}}]"
+
+    echo "[$(date +%T)] Waiting for Application ${APP_NAME} to be deleted..."
+
+    elapsed=0
+    while [[ $elapsed -lt $TIMEOUT ]]; do
+      http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
+        -H "Authorization: Bearer ${TOKEN}" \
+        "https://${ARGOCD_SERVER}/api/v1/applications/${APP_NAME}")
+
+      echo "[$(date +%T)] +${elapsed}s HTTP=${http_code}"
+
+      if [[ "${http_code}" == "404" ]]; then
+        echo "[$(date +%T)] ✓ ${APP_NAME} deleted"
+        exit 0
+      fi
+
+      sleep "${POLL_INTERVAL}"
+      elapsed=$((elapsed + POLL_INTERVAL))
+    done
+    echo "[$(date +%T)] ✗ Timeout ${TIMEOUT}s"
+    exit 1
+
+# ── NetworkPolicy: my-mng ─────────────────────────────────────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-mng-netpol
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: my-mng
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # ALB → my-mng
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aws-load-balancer
+      ports:
+        - port: 3000
+    # 同一namespace内
+    - from:
+        - podSelector: {}
+  egress:
+    - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - ports: [{protocol: TCP, port: 443}]   # AWS APIs + ArgoCD
+    - ports: [{protocol: TCP, port: 5432}]  # RDS
+    - ports: [{protocol: TCP, port: 2049}]  # EFS
+    - ports: [{protocol: TCP, port: 2222}]  # rsync sidecar
+
+# ── HPA ───────────────────────────────────────────────────────────────────────
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: my-mng
+  namespace: {{ .Release.Namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-mng
+  minReplicas: {{ .Values.autoscaling.minReplicas | default 1 }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas | default 2 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+
+# ── PDB ───────────────────────────────────────────────────────────────────────
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: my-mng
+  namespace: {{ .Release.Namespace }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-mng

@@ -1,0 +1,287 @@
+{{/* ==========================================================================
+  helm/my-app/templates/aws-resources.yaml
+  my-app テナント用 AWS連携リソース
+  (アプリコード自体は既存のため、インフラ連携部分のみ生成)
+
+  配置: Karpenter workload nodes (tenant-workload NodePool)
+        計算集約時は my-app-compute NodePool も使用
+  namespace: app-<uuid>  (my-mng Jobがランダム生成)
+
+  通信経路:
+    Browser → NGINX-Ingress → my-gui → envoy → my-app Pod(3000)
+  ========================================================================== */}}
+
+# ── ServiceAccount ────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app-sa
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "my-app.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+automountServiceAccountToken: true
+
+# ── EFS PVC (ReadWriteMany) ───────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-app-efs
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "my-app.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size | default "20Gi" }}
+
+# ── ExternalSecret: DB Credentials ───────────────────────────────────────────
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: db-credentials
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  target:
+    name: db-credentials
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      data:
+        DB_HOST:      "{{ `{{ .host }}` }}"
+        DB_PORT:      "{{ `{{ .port }}` }}"
+        DB_NAME:      "{{ `{{ .dbname }}` }}"
+        DB_USERNAME:  "{{ `{{ .username }}` }}"
+        DB_PASSWORD:  "{{ `{{ .password }}` }}"
+        DATABASE_URL: "postgresql://{{ `{{ .username }}` }}:{{ `{{ .password }}` }}@{{ `{{ .host }}` }}:{{ `{{ .port }}` }}/{{ `{{ .dbname }}` }}?sslmode=require"
+  data:
+    - secretKey: host
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: host
+    - secretKey: port
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: port
+    - secretKey: dbname
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: dbname
+    - secretKey: username
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: username
+    - secretKey: password
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: password
+
+# ── cert-manager Certificate (rsync SSH用) ────────────────────────────────────
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: my-app-ssh-cert
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  secretName: my-app-ssh-cert
+  issuerRef:
+    name: internal-ca-issuer
+    kind: ClusterIssuer
+  commonName: my-app.{{ .Release.Namespace }}.svc.cluster.local
+  dnsNames:
+    - my-app
+    - my-app.{{ .Release.Namespace }}
+    - my-app.{{ .Release.Namespace }}.svc.cluster.local
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+
+# ── Leader Election RBAC ──────────────────────────────────────────────────────
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: my-app-leader-election
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: my-app-leader-election
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: my-app-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: app-sa
+    namespace: {{ .Release.Namespace }}
+
+# ── Service ───────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-app
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "my-app.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "my-app.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+    - name: ssh
+      port: 2222
+      targetPort: 2222
+
+# ── HPA (計算量変動対応) ──────────────────────────────────────────────────────
+# my-appは計算量に応じてPod数が変動する
+# 計算集約Pod は my-app-compute NodePool (Karpenter) に配置
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: my-app
+  namespace: {{ .Release.Namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-app
+  minReplicas: {{ .Values.autoscaling.minReplicas | default 2 }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas | default 20 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60   # my-appは計算負荷が高いので低めに設定
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # カスタムメトリクス: ジョブキュー深度 (アプリ側で実装)
+    {{- if .Values.autoscaling.customMetrics.enabled }}
+    - type: Pods
+      pods:
+        metric:
+          name: {{ .Values.autoscaling.customMetrics.metricName | default "job_queue_depth" }}
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.autoscaling.customMetrics.targetValue | default "10" }}
+    {{- end }}
+  behavior:
+    # スケールアップ: 計算負荷増大に素早く対応
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 5
+          periodSeconds: 30
+      selectPolicy: Max
+    # スケールダウン: 計算完了後は緩やかに縮小
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Percent
+          value: 20
+          periodSeconds: 60
+
+# ── PDB ───────────────────────────────────────────────────────────────────────
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: my-app
+  namespace: {{ .Release.Namespace }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "my-app.selectorLabels" . | nindent 6 }}
+
+# ── NetworkPolicy ─────────────────────────────────────────────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-app-netpol
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "my-app.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # my-gui namespace (envoy) → my-app
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/tenant-type: gui
+      ports:
+        - port: 3000
+    # 同一namespace内
+    - from:
+        - podSelector: {}
+  egress:
+    # DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # AWS APIs (SM等)
+    - ports:
+        - protocol: TCP
+          port: 443
+    # RDS
+    - ports:
+        - protocol: TCP
+          port: 5432
+    # EFS
+    - ports:
+        - protocol: TCP
+          port: 2049
+    # rsync
+    - ports:
+        - protocol: TCP
+          port: 2222

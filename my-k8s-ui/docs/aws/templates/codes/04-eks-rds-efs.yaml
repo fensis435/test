@@ -251,6 +251,25 @@ Resources:
           Fn::Sub: ${ProjectName}-${Environment}-EFSSecurityGroupId
 
   # EFS Access Points (gui / app / shared)
+  # my-mng: オーケストレータ兼WebUI (system MNG上で常駐)
+  EFSMngAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser:
+        Uid: '1000'
+        Gid: '1000'
+      RootDirectory:
+        CreationInfo:
+          OwnerUid: '1000'
+          OwnerGid: '1000'
+          Permissions: '755'
+        Path: /mng-data
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-efs-mng-ap
+
+  # my-gui: ユーザ毎テナント分離 (Karpenter workload nodes)
   EFSGUIAccessPoint:
     Type: AWS::EFS::AccessPoint
     Properties:
@@ -268,6 +287,7 @@ Resources:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-efs-gui-ap
 
+  # my-app: サービス毎テナント分離 (Karpenter workload nodes)
   EFSAppAccessPoint:
     Type: AWS::EFS::AccessPoint
     Properties:
@@ -285,6 +305,7 @@ Resources:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-efs-app-ap
 
+  # shared: rsync staging
   EFSSharedAccessPoint:
     Type: AWS::EFS::AccessPoint
     Properties:
@@ -465,6 +486,11 @@ Outputs:
     Value: !Ref EFSFileSystem
     Export:
       Name: !Sub ${ProjectName}-${Environment}-EFSFileSystemId
+  EFSMngAccessPointId:
+    Value: !Ref EFSMngAccessPoint
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-EFSMngAccessPointId
+
   EFSGUIAccessPointId:
     Value: !Ref EFSGUIAccessPoint
     Export:

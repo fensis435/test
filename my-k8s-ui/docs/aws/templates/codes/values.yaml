@@ -1,0 +1,48 @@
+# helm/my-mng/values.yaml
+# my-mng: オーケストレータ常駐サービス (system Managed Node Group上で動作)
+
+image:
+  repository: "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/my-app-mng"
+  tag: latest
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  name: my-mng-sa
+
+# system MNG上で動作 (Karpenter workerには配置しない)
+nodeSelector:
+  role: system
+
+tolerations:
+  - key: CriticalAddonsOnly
+    operator: Exists
+    effect: NoSchedule
+
+# Multi-AZ: 初期1台 (system MNGと同じ考え方)
+autoscaling:
+  minReplicas: 1
+  maxReplicas: 2
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+persistence:
+  size: 10Gi
+
+# AWS設定 (deploy.sh が cluster-config ConfigMapから注入)
+aws:
+  domainName: ""          # deploy.shが設定
+  acmCertificateArn: ""   # deploy.shが設定
+  wafWebAclArn: ""        # deploy.shが設定
+  region: "ap-northeast-1"
+
+# Secrets Manager シークレット名
+secretsManager:
+  rdsSecretName: "eks-project/prod/rds/master-credentials"
+  cognitoSecretName: "eks-project/prod/cognito/config"
+  argoCDTokenSecretName: "eks-project/prod/argocd/mng-deployer-token"

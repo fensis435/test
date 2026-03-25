@@ -1,0 +1,426 @@
+{{/* ==========================================================================
+  helm/my-gui/templates/aws-resources.yaml
+  my-gui テナント用 AWS連携リソース
+  (アプリコード自体は既存のため、インフラ連携部分のみ生成)
+
+  配置: Karpenter workload nodes (system MNGではない)
+  namespace: gui-<uuid>  (my-mng Jobがランダム生成)
+
+  通信経路:
+    Browser → Route53 → ALB(WAF) → NGINX-Ingress(パス書換)
+      → my-gui Pod(3000) → envoy(9901) → my-app Service
+  ========================================================================== */}}
+
+# ── ServiceAccount (Pod Identity — アノテーション不要) ───────────────────────
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gui-sa
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "my-gui.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+automountServiceAccountToken: true
+
+# ── EFS PVC (ReadWriteMany — 2AZ安全, EBSは使わない) ─────────────────────────
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-gui-efs
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "my-gui.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size | default "10Gi" }}
+
+# ── ExternalSecret: DB Credentials ───────────────────────────────────────────
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: db-credentials
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  target:
+    name: db-credentials
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      data:
+        DB_HOST:      "{{ `{{ .host }}` }}"
+        DB_PORT:      "{{ `{{ .port }}` }}"
+        DB_NAME:      "{{ `{{ .dbname }}` }}"
+        DB_USERNAME:  "{{ `{{ .username }}` }}"
+        DB_PASSWORD:  "{{ `{{ .password }}` }}"
+        DATABASE_URL: "postgresql://{{ `{{ .username }}` }}:{{ `{{ .password }}` }}@{{ `{{ .host }}` }}:{{ `{{ .port }}` }}/{{ `{{ .dbname }}` }}?sslmode=require"
+  data:
+    - secretKey: host
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: host
+    - secretKey: port
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: port
+    - secretKey: dbname
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: dbname
+    - secretKey: username
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: username
+    - secretKey: password
+      remoteRef:
+        key: {{ .Values.secretsManager.rdsSecretName }}
+        property: password
+
+# ── ExternalSecret: Cognito Config ───────────────────────────────────────────
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: cognito-config
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  refreshInterval: 24h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  target:
+    name: cognito-config
+    creationPolicy: Owner
+  data:
+    - secretKey: COGNITO_USER_POOL_ID
+      remoteRef:
+        key: {{ .Values.secretsManager.cognitoSecretName }}
+        property: user_pool_id
+    - secretKey: COGNITO_CLIENT_ID
+      remoteRef:
+        key: {{ .Values.secretsManager.cognitoSecretName }}
+        property: client_id
+    - secretKey: COGNITO_REGION
+      remoteRef:
+        key: {{ .Values.secretsManager.cognitoSecretName }}
+        property: region
+
+# ── cert-manager Certificate (rsync SSH用) ────────────────────────────────────
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: my-gui-ssh-cert
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  secretName: my-gui-ssh-cert
+  issuerRef:
+    name: internal-ca-issuer
+    kind: ClusterIssuer
+  commonName: my-gui.{{ .Release.Namespace }}.svc.cluster.local
+  dnsNames:
+    - my-gui
+    - my-gui.{{ .Release.Namespace }}
+    - my-gui.{{ .Release.Namespace }}.svc.cluster.local
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+
+# ── Leader Election RBAC ──────────────────────────────────────────────────────
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: my-gui-leader-election
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: my-gui-leader-election
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: my-gui-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: gui-sa
+    namespace: {{ .Release.Namespace }}
+
+# ── Service ───────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-gui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "my-gui.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "my-gui.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+    - name: ssh
+      port: 2222
+      targetPort: 2222
+    - name: envoy-admin
+      port: 9901
+      targetPort: 9901
+
+# ── NGINX Ingress ─────────────────────────────────────────────────────────────
+# ALB → NGINX Ingress Controller → (パス書換) → my-gui Service
+# NGINX が /gui-<uuid>/path → /path に書き換えてリバースプロキシ
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-gui-nginx
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # NGINX Ingress を使用 (ALB直接ではなく NGINX 経由)
+    kubernetes.io/ingress.class: nginx
+    # URLパス書き換え: /gui-<uuid>/(.*) → /$1
+    # ブラウザには /gui-<uuid>/path が見えるが、my-guiには /path として届く
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    # my-guiがオリジナルパスを知れるようにヘッダー付与
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header X-Tenant-Namespace {{ .Release.Namespace }};
+      proxy_set_header X-Tenant-Id {{ .Values.tenant.userId | default "" }};
+      proxy_set_header X-Forwarded-Prefix /gui-{{ .Values.tenant.userId | default "" }};
+    # WebSocket (my-guiがAction Cableを使う場合)
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: {{ .Values.aws.domainName | default "example.com" }}
+      http:
+        paths:
+          # /gui-<userId>/(.*) をパス書換してmy-guiへ
+          - path: /gui-{{ .Values.tenant.userId | default "unknown" }}(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: my-gui
+                port:
+                  number: 80
+
+# ── envoy ConfigMap ───────────────────────────────────────────────────────────
+# my-gui内のenvoyがmy-appサービスへのURL書き換えリバースプロキシを担当
+# (envoy自体はmy-guiのサイドカーまたは別Podとして既存コードで実装済み)
+# ここではenvoyが参照するConfigMapのみ生成
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "my-gui.labels" . | nindent 4 }}
+data:
+  envoy.yaml: |
+    # ===========================================================================
+    # envoy 設定: my-gui → my-app へのURL書き換えリバースプロキシ
+    # ブラウザから my-app サービス用WebサーバへのURL書き換えを行う
+    # ===========================================================================
+    admin:
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 9901
+
+    static_resources:
+      listeners:
+        - name: listener_0
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 10000
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: ingress_http
+                    access_log:
+                      - name: envoy.access_loggers.stdout
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                    route_config:
+                      name: local_route
+                      virtual_hosts:
+                        - name: my_app_service
+                          domains: ["*"]
+                          routes:
+                            # /app-<serviceId>/(.*) → my-appサービスの /$1 に書き換え
+                            - match:
+                                safe_regex:
+                                  regex: "^/app-([^/]+)/(.*)"
+                              route:
+                                cluster: my_app_cluster
+                                regex_rewrite:
+                                  pattern:
+                                    regex: "^/app-([^/]+)/(.*)"
+                                  substitution: "/\\2"
+                              request_headers_to_add:
+                                - header:
+                                    key: X-App-Namespace
+                                    # app-<serviceId> namespace
+                                    value: "app-%REQ(:path)%"
+                                  keep_empty_value: false
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+      clusters:
+        - name: my_app_cluster
+          connect_timeout: 5s
+          type: LOGICAL_DNS
+          dns_lookup_family: V4_ONLY
+          load_assignment:
+            cluster_name: my_app_cluster
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          # my-app Service は app-<serviceId> namespace にある
+                          # my-mng がこの値を動的に設定する
+                          address: {{ .Values.myApp.serviceHost | default "my-app.app-default.svc.cluster.local" }}
+                          port_value: {{ .Values.myApp.servicePort | default 80 }}
+
+# ── HPA ───────────────────────────────────────────────────────────────────────
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: my-gui
+  namespace: {{ .Release.Namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-gui
+  minReplicas: {{ .Values.autoscaling.minReplicas | default 2 }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas | default 4 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+
+# ── PDB ───────────────────────────────────────────────────────────────────────
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: my-gui
+  namespace: {{ .Release.Namespace }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "my-gui.selectorLabels" . | nindent 6 }}
+
+# ── NetworkPolicy ─────────────────────────────────────────────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-gui-netpol
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "my-gui.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # NGINX Ingress → my-gui
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 3000
+    # 同一namespace内 (rsync, envoy)
+    - from:
+        - podSelector: {}
+  egress:
+    # DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # AWS APIs (SM, SQS, Cognito等) VPCエンドポイント経由
+    - ports:
+        - protocol: TCP
+          port: 443
+    # RDS
+    - ports:
+        - protocol: TCP
+          port: 5432
+    # EFS
+    - ports:
+        - protocol: TCP
+          port: 2049
+    # rsync sidecar
+    - ports:
+        - protocol: TCP
+          port: 2222
+    # envoy → my-app (app-* namespace)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/tenant-type: app
+      ports:
+        - port: 80
+        - port: 3000
