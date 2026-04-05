@@ -1,5 +1,3 @@
----
-
 # 完全private構成
 
 ```mermaid
