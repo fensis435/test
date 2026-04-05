@@ -1,5 +1,3 @@
----
-
 # 🎯 前提（Pod Identity版）
 
 * クラスタは Amazon EKS

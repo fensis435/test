@@ -1,4 +1,4 @@
-# 完全private構成
+# 🎯 完全private構成
 
 ```mermaid
 flowchart TB
