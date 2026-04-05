@@ -25,18 +25,22 @@ Parameters:
   ClusterName:
     Type: String
     Default: my-eks
+  VPC:
+    Type: AWS::EC2::VPC::Id # Specify VPC using CLI parameters.
+  RouteTableId:
+    Type: String
+    Description: Route Table ID for the VPC
 
 Resources:
-
 # ------------------------
-# VPC
+# VPC (case: New VPC)
 # ------------------------
-  VPC:
-    Type: AWS::EC2::VPC
-    Properties:
-      CidrBlock: 10.0.0.0/16
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
+#  VPC:
+#    Type: AWS::EC2::VPC
+#    Properties:
+#      CidrBlock: 10.0.0.0/16
+#      EnableDnsSupport: true
+#      EnableDnsHostnames: true
 
 # ------------------------
 # Subnets (Private Only)
@@ -47,6 +51,11 @@ Resources:
       VpcId: !Ref VPC
       CidrBlock: 10.0.1.0/24
       AvailabilityZone: ap-northeast-1a
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-subnet-a"
+        - Key: "kubernetes.io/role/internal-elb"
+          Value: "1"
 
   PrivateSubnetB:
     Type: AWS::EC2::Subnet
@@ -54,6 +63,11 @@ Resources:
       VpcId: !Ref VPC
       CidrBlock: 10.0.2.0/24
       AvailabilityZone: ap-northeast-1c
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-subnet-b"
+        - Key: "kubernetes.io/role/internal-elb"
+          Value: "1"
 
 # ------------------------
 # Security Group
@@ -61,8 +75,13 @@ Resources:
   EKSSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: EKS SG
+      GroupDescription: EKS and Endpoint SG
       VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 10.0.0.0/16 # VPC内通信を許可
 
 # ------------------------
 # IAM Roles
@@ -92,6 +111,7 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
         - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore # SSMログイン用
 
 # ------------------------
 # EKS Cluster（Private）
@@ -115,6 +135,7 @@ Resources:
 # ------------------------
   NodeGroup:
     Type: AWS::EKS::Nodegroup
+    DependsOn: EKSCluster # クラスターができてから作成
     Properties:
       ClusterName: !Ref ClusterName
       NodeRole: !GetAtt NodeRole.Arn
@@ -131,33 +152,47 @@ Resources:
 # ------------------------
 # VPC Endpoints（重要）
 # ------------------------
-
   S3Endpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
       VpcId: !Ref VPC
-      ServiceName: com.amazonaws.ap-northeast-1.s3
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
       VpcEndpointType: Gateway
+      RouteTableIds: 
+        - !Ref RouteTableId
 
   ECREndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
       VpcId: !Ref VPC
-      ServiceName: com.amazonaws.ap-northeast-1.ecr.api
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
       VpcEndpointType: Interface
       SubnetIds:
         - !Ref PrivateSubnetA
         - !Ref PrivateSubnetB
+      SecurityGroupIds: [!Ref EKSSG]
 
   ECRDockerEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
       VpcId: !Ref VPC
-      ServiceName: com.amazonaws.ap-northeast-1.ecr.dkr
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
       VpcEndpointType: Interface
       SubnetIds:
         - !Ref PrivateSubnetA
         - !Ref PrivateSubnetB
+      SecurityGroupIds: [!Ref EKSSG]
+
+  STSEndpoint: # プライベート環境でのIAM認証に必要
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sts"
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroupIds: [!Ref EKSSG]
 
 Outputs:
   ClusterName:
@@ -175,10 +210,23 @@ Outputs:
 # ▶️ デプロイ
 
 ```bash
+aws ec2 describe-vpcs \
+  --query "Vpcs[].[{CIDR:CidrBlock,Name:Tags[0].Value,VpcId:VpcId}]" \
+   --out table
+
+aws ec2 describe-route-tables \
+  --filters "Name=vpc-id,Values=vpc-xxxxxxxxxxxxxxxxx" \
+  --query "RouteTables[*].RouteTableId" \
+  --output text
+
 aws cloudformation deploy \
   --stack-name foundation \
   --template-file step0-foundation.yaml \
-  --capabilities CAPABILITY_NAMED_IAM
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+      VPC=vpc-0123456789 \
+      RouteTableId=rtb-0123456789 \
+      ClusterName=my-eks
 ```
 
 ---
