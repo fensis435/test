@@ -108,7 +108,7 @@ VPN --> ALB
 
 ---
 
-# 🧠 図の読み方（重要ポイント）
+# 🧠 図の読み方(重要ポイント)
 
 ---
 
@@ -140,10 +140,10 @@ ALB → nginx → envoy → app
 
 ---
 
-👉 あなたの設計そのまま：
+👉 あなたの設計そのまま:
 
-* 1段目：nginx（rewrite）
-* 2段目：envoy（workspace routing）
+* 1段目:nginx(rewrite)
+* 2段目:envoy(workspace routing)
 
 ---
 
@@ -207,17 +207,17 @@ VPC Endpoint経由
 
 ---
 
-👉 SSM直接でもOK：
+👉 SSM直接でもOK:
 
 ```text
-User → SSM → ALB（port forward）
+User → SSM → ALB(port forward)
 ```
 
 ---
 
 ---
 
-## ❗ NAT Gatewayを使うか？
+## ❗ NAT Gatewayを使うか?
 
 ---
 
