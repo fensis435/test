@@ -1,6 +1,6 @@
 ---
 
-# 🎯 完全private構成（AWS込み）
+# 完全private構成（AWS込み）
 
 ```mermaid
 flowchart TB
