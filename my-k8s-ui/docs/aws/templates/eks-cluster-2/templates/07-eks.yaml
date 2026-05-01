@@ -1,0 +1,302 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "EKS クラスタ (完全プライベート) + Managed Node Group (管理用Pod常駐)"
+
+Parameters:
+  ClusterName:
+    Type: String
+  EksVersion:
+    Type: String
+    Default: "1.31"
+  EksClusterRoleArn:
+    Type: String
+  EksNodeRoleArn:
+    Type: String
+  EksSubnet1:
+    Type: AWS::EC2::Subnet::Id
+  EksSubnet2:
+    Type: AWS::EC2::Subnet::Id
+  EksClusterSg:
+    Type: AWS::EC2::SecurityGroup::Id
+  NodeSg:
+    Type: AWS::EC2::SecurityGroup::Id
+  KmsEksKeyArn:
+    Type: String
+  KmsEbsKeyArn:
+    Type: String
+  NodeInstanceType:
+    Type: String
+    Default: "m6i.xlarge"
+  NodeMin:
+    Type: Number
+    Default: 2
+  NodeMax:
+    Type: Number
+    Default: 2
+  NodeDesired:
+    Type: Number
+    Default: 2
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # EKS クラスタ
+  # ---------------------------------------------------------------------------
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref ClusterName
+      Version: !Ref EksVersion
+      RoleArn: !Ref EksClusterRoleArn
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !Ref EksSubnet1
+          - !Ref EksSubnet2
+        SecurityGroupIds:
+          - !Ref EksClusterSg
+        EndpointPublicAccess: false   # 完全プライベート
+        EndpointPrivateAccess: true
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      EncryptionConfig:
+        - Provider:
+            KeyArn: !Ref KmsEksKeyArn
+          Resources:
+            - secrets
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
+      Tags:
+        - Key: Name
+          Value: !Ref ClusterName
+        - Key: !Sub "kubernetes.io/cluster/${ClusterName}"
+          Value: owned
+
+  # ---------------------------------------------------------------------------
+  # EKS アドオン (EKS マネージドアドオン)
+  # ---------------------------------------------------------------------------
+  EksAddonCni:
+    Type: AWS::EKS::Addon
+    DependsOn: EksCluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      AddonName: vpc-cni
+      AddonVersion: "v1.18.3-eksbuild.3"
+      ResolveConflicts: OVERWRITE
+      ConfigurationValues: |
+        {
+          "env": {
+            "ENABLE_PREFIX_DELEGATION": "true",
+            "WARM_PREFIX_TARGET": "1",
+            "ENABLE_POD_ENI": "false"
+          }
+        }
+
+  EksAddonCoreDns:
+    Type: AWS::EKS::Addon
+    DependsOn: EksManagedNodeGroup
+    Properties:
+      ClusterName: !Ref ClusterName
+      AddonName: coredns
+      AddonVersion: "v1.11.1-eksbuild.9"
+      ResolveConflicts: OVERWRITE
+
+  EksAddonKubeProxy:
+    Type: AWS::EKS::Addon
+    DependsOn: EksCluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      AddonName: kube-proxy
+      AddonVersion: "v1.31.2-eksbuild.3"
+      ResolveConflicts: OVERWRITE
+
+  EksAddonPodIdentityAgent:
+    Type: AWS::EKS::Addon
+    DependsOn: EksCluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      AddonName: eks-pod-identity-agent
+      AddonVersion: "v1.3.2-eksbuild.2"
+      ResolveConflicts: OVERWRITE
+
+  # ---------------------------------------------------------------------------
+  # Launch Template for Managed Node Group
+  # ---------------------------------------------------------------------------
+  NodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${ClusterName}-mng-lt"
+      LaunchTemplateData:
+        InstanceType: !Ref NodeInstanceType
+        SecurityGroupIds:
+          - !Ref NodeSg
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 50
+              VolumeType: gp3
+              Iops: 3000
+              Throughput: 125
+              Encrypted: true
+              KmsKeyId: !Ref KmsEbsKeyArn
+              DeleteOnTermination: true
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpPutResponseHopLimit: 2   # IMDSv2対応 (Karpenter要件)
+          HttpTokens: required          # IMDSv2強制
+        Monitoring:
+          Enabled: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "${ClusterName}-mng-node"
+              - Key: !Sub "kubernetes.io/cluster/${ClusterName}"
+                Value: owned
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub "${ClusterName}-mng-volume"
+        UserData:
+          Fn::Base64:
+            !Sub |
+              MIME-Version: 1.0
+              Content-Type: multipart/mixed; boundary="==BOUNDARY=="
+
+              --==BOUNDARY==
+              Content-Type: text/x-shellscript
+
+              #!/bin/bash
+              set -ex
+
+              # IMDSv2 のホップリミット設定確認
+              TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+                -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+
+              # sysctl チューニング (大量Pod対応)
+              cat >> /etc/sysctl.conf << 'EOF'
+              net.ipv4.ip_local_port_range = 1024 65535
+              net.core.somaxconn = 65535
+              net.ipv4.tcp_max_syn_backlog = 65535
+              fs.inotify.max_user_instances = 8192
+              fs.inotify.max_user_watches = 524288
+              EOF
+              sysctl -p
+
+              --==BOUNDARY==--
+
+  # ---------------------------------------------------------------------------
+  # Managed Node Group (管理用Pod常駐: 2台固定)
+  # ---------------------------------------------------------------------------
+  EksManagedNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    DependsOn:
+      - EksAddonCni
+      - EksAddonKubeProxy
+    Properties:
+      NodegroupName: !Sub "${ClusterName}-managed-ng"
+      ClusterName: !Ref ClusterName
+      NodeRole: !Ref EksNodeRoleArn
+      Subnets:
+        - !Ref EksSubnet1
+        - !Ref EksSubnet2
+      LaunchTemplate:
+        Id: !Ref NodeLaunchTemplate
+        Version: !GetAtt NodeLaunchTemplate.LatestVersionNumber
+      ScalingConfig:
+        MinSize: !Ref NodeMin
+        MaxSize: !Ref NodeMax
+        DesiredSize: !Ref NodeDesired
+      # 管理用ノードには taint を付与し、管理Podのみをスケジュール
+      Taints:
+        - Effect: NO_SCHEDULE
+          Key: "dedicated"
+          Value: "management"
+      Labels:
+        role: "management"
+        node-type: "managed"
+      UpdateConfig:
+        MaxUnavailable: 1
+      Tags:
+        Name: !Sub "${ClusterName}-mng"
+        !Sub "kubernetes.io/cluster/${ClusterName}": owned
+
+  # ---------------------------------------------------------------------------
+  # OIDC Provider (IRSA用)
+  # ---------------------------------------------------------------------------
+  OidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - "9e99a48a9960b14926bb7f3b02e22da2b0ab7280"  # EKS OIDC thumbprint
+
+  # ---------------------------------------------------------------------------
+  # EKS Access Entry (踏み台サーバ用)
+  # ---------------------------------------------------------------------------
+  # 踏み台EC2のIAMロール ARN を正しく設定すること
+  # BastionAccessEntry:
+  #   Type: AWS::EKS::AccessEntry
+  #   DependsOn: EksCluster
+  #   Properties:
+  #     ClusterName: !Ref ClusterName
+  #     PrincipalArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/bastion-role"
+  #     AccessPolicies:
+  #       - AccessScope:
+  #           Type: cluster
+  #         PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch アラーム: ノード数監視
+  # ---------------------------------------------------------------------------
+  NodeCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ClusterName}-mng-node-count-low"
+      AlarmDescription: "MNG node count below expected"
+      MetricName: cluster_node_count
+      Namespace: ContainerInsights
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref NodeMin
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ClusterName
+
+Outputs:
+  ClusterName:
+    Value: !Ref ClusterName
+    Export:
+      Name: !Sub "${ClusterName}-ClusterName"
+  ClusterArn:
+    Value: !GetAtt EksCluster.Arn
+    Export:
+      Name: !Sub "${ClusterName}-ClusterArn"
+  ClusterEndpoint:
+    Value: !GetAtt EksCluster.Endpoint
+    Export:
+      Name: !Sub "${ClusterName}-ClusterEndpoint"
+  OidcUrl:
+    Value: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+    Export:
+      Name: !Sub "${ClusterName}-OidcUrl"
+  OidcProviderArn:
+    Value: !Ref OidcProvider
+    Export:
+      Name: !Sub "${ClusterName}-OidcProviderArn"
+  NodeGroupArn:
+    Value: !GetAtt EksManagedNodeGroup.Arn
+    Export:
+      Name: !Sub "${ClusterName}-NodeGroupArn"
+  LaunchTemplateId:
+    Value: !Ref NodeLaunchTemplate
+    Export:
+      Name: !Sub "${ClusterName}-LaunchTemplateId"

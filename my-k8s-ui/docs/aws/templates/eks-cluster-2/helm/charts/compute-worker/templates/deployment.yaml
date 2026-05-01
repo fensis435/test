@@ -1,0 +1,145 @@
+{{/*
+compute-worker/templates/deployment.yaml
+Karpenterが動的にノードを起動してスケジュールする計算Pod
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-compute-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: compute-worker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: compute-worker
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: compute-worker
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: compute
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          env:
+            - name: AWS_REGION
+              value: {{ .Values.env.AWS_REGION | quote }}
+            - name: DATABASE_HOST
+              value: {{ .Values.env.DATABASE_HOST | quote }}
+            - name: DATABASE_PORT
+              value: {{ .Values.env.DATABASE_PORT | quote }}
+            - name: DATABASE_NAME
+              value: {{ .Values.env.DATABASE_NAME | quote }}
+            - name: S3_DATA_BUCKET
+              value: {{ .Values.env.S3_DATA_BUCKET | quote }}
+            - name: EFS_MOUNT_PATH
+              value: {{ .Values.env.EFS_MOUNT_PATH | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          envFrom:
+            - secretRef:
+                name: compute-rds-credentials
+          volumeMounts:
+            {{- if .Values.persistence.ebs.enabled }}
+            - name: local-data
+              mountPath: {{ .Values.persistence.ebs.mountPath }}
+            {{- end }}
+            {{- if .Values.persistence.efs.enabled }}
+            - name: shared-data
+              mountPath: {{ .Values.persistence.efs.mountPath }}
+            {{- end }}
+          {{- if .Values.gpuEnabled }}
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          {{- end }}
+      volumes:
+        {{- if .Values.persistence.ebs.enabled }}
+        - name: local-data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-ebs-pvc
+        {{- end }}
+        {{- if .Values.persistence.efs.enabled }}
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.efs.claimName }}
+        {{- end }}
+---
+{{/* EBS PVC (WaitForFirstConsumer でKarpenterノード起動後にバインド) */}}
+{{- if .Values.persistence.ebs.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-ebs-pvc
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.persistence.ebs.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.ebs.size }}
+{{- end }}
+---
+{{/* EFS 共有 PVC (静的バインド) */}}
+{{- if .Values.persistence.efs.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.persistence.efs.claimName }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: efs-shared-pv
+{{- end }}
+---
+{{/* ExternalSecret for compute RDS credentials */}}
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: compute-rds-credentials
+  namespace: {{ .Release.Namespace }}
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: ClusterSecretStore
+  target:
+    name: compute-rds-credentials
+    creationPolicy: Owner
+  data:
+    - secretKey: DATABASE_USERNAME
+      remoteRef:
+        key: "{{ $.Values.global.clusterName | default "private-eks-cluster" }}/rds/password"
+        property: username
+    - secretKey: DATABASE_PASSWORD
+      remoteRef:
+        key: "{{ $.Values.global.clusterName | default "private-eks-cluster" }}/rds/password"
+        property: password

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: compute-worker
+description: "計算用ワーカーPod - Karpenter動的起動 / EBS+EFS PV / RDS PostgreSQL"
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

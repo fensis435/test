@@ -1,0 +1,251 @@
+# =============================================================================
+# rails-app/values.yaml
+# ArgoCD + GitOps で管理される values
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# グローバル設定
+# ---------------------------------------------------------------------------
+global:
+  clusterName: "private-eks-cluster"
+  awsRegion: "ap-northeast-1"
+  awsAccountId: ""          # deploy時に上書き
+  environment: "production"
+
+# ---------------------------------------------------------------------------
+# イメージ設定
+# ---------------------------------------------------------------------------
+image:
+  repository: ""            # ECR URI (deploy時に上書き)
+  tag: "latest"             # CodeBuildがコミットSHAで上書き
+  pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# レプリカ (管理用MNGノードに2台常駐)
+# ---------------------------------------------------------------------------
+replicaCount: 2
+
+# ---------------------------------------------------------------------------
+# リソース
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+# ---------------------------------------------------------------------------
+# ノード配置 (管理用MNGノード固定)
+# ---------------------------------------------------------------------------
+nodeSelector:
+  role: management
+
+tolerations:
+  - key: dedicated
+    value: management
+    effect: NoSchedule
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [rails-app]
+          topologyKey: kubernetes.io/hostname
+
+# ---------------------------------------------------------------------------
+# Service Account (IRSA)
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: false             # CFnで作成済み
+  name: rails-app
+  annotations:
+    eks.amazonaws.com/role-arn: ""  # deploy時にIRSAロールARNを設定
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 3000
+  targetPort: 3000
+
+# ---------------------------------------------------------------------------
+# Ingress (ALB Internal - VPC内のみ)
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: alb
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/success-codes: "200"
+    # Cognitoによる認証をALBレベルで実施
+    alb.ingress.kubernetes.io/auth-type: cognito
+    alb.ingress.kubernetes.io/auth-idp-cognito: |
+      {
+        "userPoolArn": "",
+        "userPoolClientId": "",
+        "userPoolDomain": ""
+      }
+    alb.ingress.kubernetes.io/auth-on-unauthenticated-request: authenticate
+    alb.ingress.kubernetes.io/auth-session-cookie: AWSELBAuthSessionCookie
+    alb.ingress.kubernetes.io/auth-session-timeout: "3600"
+  hosts:
+    - host: "rails.internal"
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# ---------------------------------------------------------------------------
+# 環境変数
+# ---------------------------------------------------------------------------
+env:
+  RAILS_ENV: production
+  RAILS_LOG_TO_STDOUT: "true"
+  RAILS_SERVE_STATIC_FILES: "true"
+  PORT: "3000"
+  WEB_CONCURRENCY: "2"
+  RAILS_MAX_THREADS: "5"
+  # DB (RDS Proxy経由)
+  DATABASE_HOST: ""         # RDS Proxy エンドポイント
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "appdb"
+  DATABASE_SSLMODE: "verify-full"
+  # SQS
+  SQS_QUEUE_URL: ""         # ユーザイベントキューURL
+  AWS_REGION: "ap-northeast-1"
+  # Cognito
+  COGNITO_USER_POOL_ID: ""
+  COGNITO_CLIENT_ID: ""
+  COGNITO_ISSUER: ""        # https://cognito-idp.{region}.amazonaws.com/{pool_id}
+  COGNITO_JWKS_URI: ""      # {issuer}/.well-known/jwks.json
+  # Rails
+  RAILS_MASTER_KEY: ""      # Secrets Managerから取得
+
+# ---------------------------------------------------------------------------
+# Secrets (External Secrets Operator経由)
+# ---------------------------------------------------------------------------
+externalSecrets:
+  enabled: true
+  refreshInterval: "1h"
+  secrets:
+    - name: rds-credentials
+      remoteRef:
+        key: "private-eks-cluster/rds/password"
+      data:
+        - secretKey: username
+          remoteRef:
+            property: username
+        - secretKey: password
+          remoteRef:
+            property: password
+    - name: rails-master-key
+      remoteRef:
+        key: "private-eks-cluster/rails/master_key"
+      data:
+        - secretKey: RAILS_MASTER_KEY
+          remoteRef:
+            property: master_key
+    - name: cognito-client-secret
+      remoteRef:
+        key: "private-eks-cluster/cognito/client_secret"
+      data:
+        - secretKey: COGNITO_CLIENT_SECRET
+          remoteRef:
+            property: client_secret
+
+# ---------------------------------------------------------------------------
+# PersistentVolume (EFS - 共有ファイルストレージ)
+# ---------------------------------------------------------------------------
+persistence:
+  enabled: true
+  storageClassName: efs-sc
+  accessMode: ReadWriteMany
+  size: 10Gi
+  mountPath: /app/storage
+
+# ---------------------------------------------------------------------------
+# Probe 設定
+# ---------------------------------------------------------------------------
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# ---------------------------------------------------------------------------
+# HPA (オートスケール - 管理ノードの範囲内)
+# ---------------------------------------------------------------------------
+autoscaling:
+  enabled: false            # 管理Podは固定2台
+
+# ---------------------------------------------------------------------------
+# Pod Disruption Budget
+# ---------------------------------------------------------------------------
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# ---------------------------------------------------------------------------
+# Security Context
+# ---------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false   # Rails tmp/ などへの書き込みが必要
+  capabilities:
+    drop: [ALL]
+
+# ---------------------------------------------------------------------------
+# Migration Job (初回・更新時)
+# ---------------------------------------------------------------------------
+migrations:
+  enabled: true
+  runAsInit: true           # initContainerとして実行
+
+# ---------------------------------------------------------------------------
+# SQS Consumer (Sidekiq/Solid Queue)
+# ---------------------------------------------------------------------------
+worker:
+  enabled: true
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  command: ["bundle", "exec", "solid_queue", "--workers", "2"]

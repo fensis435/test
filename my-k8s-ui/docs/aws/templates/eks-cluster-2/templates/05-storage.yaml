@@ -1,0 +1,320 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "RDS for PostgreSQL (Multi-AZ) / EFS"
+
+Parameters:
+  ClusterName:
+    Type: String
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  EksSubnet1:
+    Type: AWS::EC2::Subnet::Id
+  EksSubnet2:
+    Type: AWS::EC2::Subnet::Id
+  RdsSg:
+    Type: AWS::EC2::SecurityGroup::Id
+  EfsSg:
+    Type: AWS::EC2::SecurityGroup::Id
+  KmsRdsKeyArn:
+    Type: String
+  KmsEbsKeyArn:
+    Type: String
+  DbInstanceClass:
+    Type: String
+    Default: "db.t3.medium"
+  DbName:
+    Type: String
+    Default: "appdb"
+  DbSecretArn:
+    Type: String
+    Description: "Secrets Manager ARN containing username/password"
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # RDS サブネットグループ
+  # ---------------------------------------------------------------------------
+  RdsSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${ClusterName} RDS subnet group"
+      SubnetIds:
+        - !Ref EksSubnet1
+        - !Ref EksSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-rds-subnet-group"
+
+  # ---------------------------------------------------------------------------
+  # RDS Parameter Group (PostgreSQL 15)
+  # ---------------------------------------------------------------------------
+  RdsParamGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Sub "${ClusterName} PostgreSQL parameter group"
+      Family: postgres15
+      Parameters:
+        log_connections: "1"
+        log_disconnections: "1"
+        log_duration: "1"
+        log_min_duration_statement: "1000"  # 1秒以上のクエリをログ
+        shared_preload_libraries: "pg_stat_statements"
+        pg_stat_statements.track: "all"
+        ssl: "1"
+        rds.force_ssl: "1"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-rds-params"
+
+  # ---------------------------------------------------------------------------
+  # RDS PostgreSQL インスタンス
+  # ---------------------------------------------------------------------------
+  RdsInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "${ClusterName}-postgres"
+      DBName: !Ref DbName
+      Engine: postgres
+      EngineVersion: "15.6"
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: "100"
+      MaxAllocatedStorage: 1000
+      StorageType: gp3
+      StorageEncrypted: true
+      KmsKeyId: !Ref KmsRdsKeyArn
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DbSecretArn}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecretArn}:SecretString:password}}"
+      DBSubnetGroupName: !Ref RdsSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RdsSg
+      DBParameterGroupName: !Ref RdsParamGroup
+      MultiAZ: true
+      BackupRetentionPeriod: 14
+      PreferredBackupWindow: "17:00-18:00"
+      PreferredMaintenanceWindow: "sun:18:30-sun:19:30"
+      EnableIAMDatabaseAuthentication: true
+      DeletionProtection: true
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RdsEnhancedMonitoringRole.Arn
+      EnableCloudwatchLogsExports:
+        - postgresql
+        - upgrade
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-postgres"
+
+  # RDS Enhanced Monitoring Role
+  RdsEnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-rds-monitoring"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+  # RDS Proxy (IAM認証 + コネクションプーリング)
+  RdsProxySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ClusterName}/rds-proxy/config"
+      Description: "RDS Proxy configuration"
+      SecretString: !Sub |
+        {"dbSecretArn":"${DbSecretArn}"}
+
+  RdsProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-rds-proxy"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RdsProxySecretsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DbSecretArn
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !Ref KmsRdsKeyArn
+
+  RdsProxy:
+    Type: AWS::RDS::DBProxy
+    Properties:
+      DBProxyName: !Sub "${ClusterName}-proxy"
+      EngineFamily: POSTGRESQL
+      Auth:
+        - AuthScheme: SECRETS
+          IAMAuth: REQUIRED
+          SecretArn: !Ref DbSecretArn
+      RoleArn: !GetAtt RdsProxyRole.Arn
+      VpcSubnetIds:
+        - !Ref EksSubnet1
+        - !Ref EksSubnet2
+      VpcSecurityGroupIds:
+        - !Ref RdsSg
+      RequireTLS: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-rds-proxy"
+
+  RdsProxyTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: !Ref RdsProxy
+      TargetGroupName: default
+      DBInstanceIdentifiers:
+        - !Ref RdsInstance
+      ConnectionPoolConfigurationInfo:
+        MaxConnectionsPercent: 80
+        MaxIdleConnectionsPercent: 50
+        ConnectionBorrowTimeout: 120
+
+  # ---------------------------------------------------------------------------
+  # EFS ファイルシステム
+  # ---------------------------------------------------------------------------
+  EfsFileSystem:
+    Type: AWS::EFS::FileSystem
+    DeletionPolicy: Retain
+    Properties:
+      Encrypted: true
+      KmsKeyId: !Ref KmsEbsKeyArn  # EFS用KMSキー (EBSキーを流用、本番は専用キー推奨)
+      PerformanceMode: generalPurpose
+      ThroughputMode: elastic
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+        - TransitionToPrimaryStorageClass: AFTER_1_ACCESS
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-efs"
+
+  EfsMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Ref EksSubnet1
+      SecurityGroups:
+        - !Ref EfsSg
+
+  EfsMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Ref EksSubnet2
+      SecurityGroups:
+        - !Ref EfsSg
+
+  # EFS Access Point (アプリ用)
+  EfsAppAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      PosixUser:
+        Uid: "1000"
+        Gid: "1000"
+      RootDirectory:
+        Path: "/app"
+        CreationInfo:
+          OwnerUid: "1000"
+          OwnerGid: "1000"
+          Permissions: "755"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-efs-app"
+
+  # EFS Access Point (共有データ用)
+  EfsSharedAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      PosixUser:
+        Uid: "0"
+        Gid: "0"
+      RootDirectory:
+        Path: "/shared"
+        CreationInfo:
+          OwnerUid: "0"
+          OwnerGid: "0"
+          Permissions: "777"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-efs-shared"
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch RDS アラーム
+  # ---------------------------------------------------------------------------
+  RdsCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ClusterName}-rds-cpu-high"
+      AlarmDescription: "RDS CPU Utilization > 80%"
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsInstance
+
+  RdsConnectionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ClusterName}-rds-connections-high"
+      AlarmDescription: "RDS Connections > 400"
+      MetricName: DatabaseConnections
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 400
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsInstance
+
+Outputs:
+  RdsEndpoint:
+    Value: !GetAtt RdsInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${ClusterName}-RdsEndpoint"
+  RdsPort:
+    Value: !GetAtt RdsInstance.Endpoint.Port
+    Export:
+      Name: !Sub "${ClusterName}-RdsPort"
+  RdsProxyEndpoint:
+    Value: !GetAtt RdsProxy.Endpoint
+    Export:
+      Name: !Sub "${ClusterName}-RdsProxyEndpoint"
+  EfsId:
+    Value: !Ref EfsFileSystem
+    Export:
+      Name: !Sub "${ClusterName}-EfsId"
+  EfsAppAccessPointId:
+    Value: !GetAtt EfsAppAccessPoint.AccessPointId
+    Export:
+      Name: !Sub "${ClusterName}-EfsAppAccessPointId"
+  EfsSharedAccessPointId:
+    Value: !GetAtt EfsSharedAccessPoint.AccessPointId
+    Export:
+      Name: !Sub "${ClusterName}-EfsSharedAccessPointId"

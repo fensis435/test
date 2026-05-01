@@ -1,0 +1,288 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "ECRリポジトリ / CodeArtifact ドメイン・リポジトリ / Helmチャート用S3バケット"
+
+Parameters:
+  ClusterName:
+    Type: String
+  CodeArtifactDomain:
+    Type: String
+  CodeArtifactRepo:
+    Type: String
+  KmsS3KeyArn:
+    Type: String
+  HelmBucket:
+    Type: String
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # ECR リポジトリ
+  # ---------------------------------------------------------------------------
+  AppEcr:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ClusterName}/app"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 20 images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["v"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Expire untagged older than 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-app-ecr"
+
+  RailsEcr:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ClusterName}/rails"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 production images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["v"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-rails-ecr"
+
+  BuildEcr:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ClusterName}/build"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 5 build images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["ubuntu24-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-build-ecr"
+
+  ComputeEcr:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ClusterName}/compute"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-compute-ecr"
+
+  # ---------------------------------------------------------------------------
+  # CodeArtifact ドメイン & リポジトリ
+  # ---------------------------------------------------------------------------
+  CodeArtifactDomainResource:
+    Type: AWS::CodeArtifact::Domain
+    Properties:
+      DomainName: !Ref CodeArtifactDomain
+      # 既存KMSキーで暗号化 (同一アカウントの場合)
+      # EncryptionKey: !Ref KmsS3KeyArn  # CodeArtifactはデフォルトKMSを使用
+
+  # pypi (pip) リポジトリ
+  PypiUpstreamRepo:
+    Type: AWS::CodeArtifact::Repository
+    Properties:
+      DomainName: !Ref CodeArtifactDomainResource
+      RepositoryName: !Sub "${CodeArtifactRepo}-pypi"
+      ExternalConnections:
+        - public:pypi
+      Description: "PyPI upstream proxy"
+
+  # npm リポジトリ
+  NpmUpstreamRepo:
+    Type: AWS::CodeArtifact::Repository
+    Properties:
+      DomainName: !Ref CodeArtifactDomainResource
+      RepositoryName: !Sub "${CodeArtifactRepo}-npm"
+      ExternalConnections:
+        - public:npmjs
+      Description: "npm upstream proxy"
+
+  # RubyGems リポジトリ
+  GemUpstreamRepo:
+    Type: AWS::CodeArtifact::Repository
+    Properties:
+      DomainName: !Ref CodeArtifactDomainResource
+      RepositoryName: !Sub "${CodeArtifactRepo}-gems"
+      ExternalConnections:
+        - public:ruby-gems-org
+      Description: "RubyGems upstream proxy"
+
+  # 内部統合リポジトリ (すべてのアップストリームを集約)
+  InternalRepo:
+    Type: AWS::CodeArtifact::Repository
+    Properties:
+      DomainName: !Ref CodeArtifactDomainResource
+      RepositoryName: !Ref CodeArtifactRepo
+      Upstreams:
+        - !GetAtt PypiUpstreamRepo.Name
+        - !GetAtt NpmUpstreamRepo.Name
+        - !GetAtt GemUpstreamRepo.Name
+      Description: "Internal aggregated repository"
+
+  # ---------------------------------------------------------------------------
+  # Helm チャート用 S3 バケット
+  # (deploy.shで作成済みだがCFnでも管理)
+  # ---------------------------------------------------------------------------
+  HelmChartBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref HelmBucket
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KmsS3KeyArn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Ref HelmBucket
+
+  # アプリデータ用 S3 バケット
+  AppDataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "${ClusterName}-app-data"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KmsS3KeyArn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: "archive-old-objects"
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 365
+                StorageClass: GLACIER
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-app-data"
+
+  ComputeDataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "${ClusterName}-compute-data"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KmsS3KeyArn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-compute-data"
+
+Outputs:
+  AppEcrUri:
+    Value: !GetAtt AppEcr.RepositoryUri
+    Export:
+      Name: !Sub "${ClusterName}-AppEcrUri"
+  RailsEcrUri:
+    Value: !GetAtt RailsEcr.RepositoryUri
+    Export:
+      Name: !Sub "${ClusterName}-RailsEcrUri"
+  BuildEcrUri:
+    Value: !GetAtt BuildEcr.RepositoryUri
+    Export:
+      Name: !Sub "${ClusterName}-BuildEcrUri"
+  ComputeEcrUri:
+    Value: !GetAtt ComputeEcr.RepositoryUri
+    Export:
+      Name: !Sub "${ClusterName}-ComputeEcrUri"
+  CodeArtifactDomainName:
+    Value: !GetAtt CodeArtifactDomainResource.Name
+    Export:
+      Name: !Sub "${ClusterName}-CodeArtifactDomainName"
+  InternalRepoName:
+    Value: !GetAtt InternalRepo.Name
+    Export:
+      Name: !Sub "${ClusterName}-InternalRepoName"
+  HelmBucketArn:
+    Value: !GetAtt HelmChartBucket.Arn
+    Export:
+      Name: !Sub "${ClusterName}-HelmBucketArn"

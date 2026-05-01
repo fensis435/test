@@ -1,0 +1,59 @@
+# =============================================================================
+# gitops/apps/rails-app/values.yaml
+# ArgoCD ApplicationSet がこのファイルを検出してデプロイ
+# CodeBuild が image.tag を自動更新する
+# =============================================================================
+
+# グローバル設定 (CFnスタックのOutputsから値を設定)
+global:
+  clusterName: "private-eks-cluster"
+  awsRegion: "ap-northeast-1"
+  awsAccountId: "123456789012"    # ← deploy.sh で自動設定
+  environment: "production"
+
+image:
+  repository: "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/private-eks-cluster/rails"
+  tag: "latest"                   # ← CodeBuild が git SHA で上書き
+
+replicaCount: 2
+
+serviceAccount:
+  name: rails-app
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/private-eks-cluster-rails-app"
+
+env:
+  RAILS_ENV: production
+  RAILS_LOG_TO_STDOUT: "true"
+  RAILS_SERVE_STATIC_FILES: "true"
+  PORT: "3000"
+  WEB_CONCURRENCY: "2"
+  RAILS_MAX_THREADS: "5"
+  DATABASE_HOST: ""               # ← RDS Proxy エンドポイント (deploy.sh で設定)
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "appdb"
+  DATABASE_SSLMODE: "verify-full"
+  SQS_QUEUE_URL: ""               # ← SQS URL (deploy.sh で設定)
+  AWS_REGION: "ap-northeast-1"
+  COGNITO_USER_POOL_ID: ""        # ← CFn Output
+  COGNITO_CLIENT_ID: ""           # ← CFn Output
+  COGNITO_ISSUER: ""              # ← CFn Output
+  COGNITO_JWKS_URI: ""            # ← CFn Output
+
+ingress:
+  enabled: true
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+
+persistence:
+  enabled: true
+  storageClassName: efs-sc
+  accessMode: ReadWriteMany
+  size: 10Gi
+  mountPath: /app/storage
+
+worker:
+  enabled: true
+  replicaCount: 1

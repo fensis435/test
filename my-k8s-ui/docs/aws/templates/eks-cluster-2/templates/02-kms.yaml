@@ -1,0 +1,281 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "EKS用 KMSキー一式"
+
+Parameters:
+  ClusterName:
+    Type: String
+  ProjectTag:
+    Type: String
+
+Resources:
+  # EKS Secrets 暗号化キー
+  EksSecretsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "${ClusterName} EKS Secrets encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Root account full access"
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: "EKS cluster service access"
+            Effect: Allow
+            Principal:
+              Service: "eks.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-eks-secrets-key"
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  EksSecretsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ClusterName}-eks-secrets"
+      TargetKeyId: !Ref EksSecretsKey
+
+  # EBS 暗号化キー
+  EbsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "${ClusterName} EBS encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Root account full access"
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: "EC2 service use"
+            Effect: Allow
+            Principal:
+              Service: "ec2.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+          - Sid: "AutoScaling service"
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+              - kms:CreateGrant
+            Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-ebs-key"
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  EbsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ClusterName}-ebs"
+      TargetKeyId: !Ref EbsKey
+
+  # RDS 暗号化キー
+  RdsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "${ClusterName} RDS encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Root account full access"
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: "RDS service"
+            Effect: Allow
+            Principal:
+              Service: "rds.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+              - kms:CreateGrant
+            Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-rds-key"
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  RdsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ClusterName}-rds"
+      TargetKeyId: !Ref RdsKey
+
+  # S3 暗号化キー
+  S3Key:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "${ClusterName} S3 encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Root account full access"
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: "S3 service"
+            Effect: Allow
+            Principal:
+              Service: "s3.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-s3-key"
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  S3KeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ClusterName}-s3"
+      TargetKeyId: !Ref S3Key
+
+  # SQS 暗号化キー
+  SqsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "${ClusterName} SQS encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Root account full access"
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: "SQS service"
+            Effect: Allow
+            Principal:
+              Service:
+                - "sqs.amazonaws.com"
+                - "events.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+          - Sid: "Cognito triggers"
+            Effect: Allow
+            Principal:
+              Service: "cognito-idp.amazonaws.com"
+            Action:
+              - kms:GenerateDataKey*
+              - kms:Decrypt
+            Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-sqs-key"
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  SqsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ClusterName}-sqs"
+      TargetKeyId: !Ref SqsKey
+
+  # Secrets Manager 暗号化キー
+  SecretsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "${ClusterName} Secrets Manager encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Root account full access"
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: "Secrets Manager service"
+            Effect: Allow
+            Principal:
+              Service: "secretsmanager.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-secrets-key"
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  SecretsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ClusterName}-secrets"
+      TargetKeyId: !Ref SecretsKey
+
+Outputs:
+  EksSecretsKeyArn:
+    Value: !GetAtt EksSecretsKey.Arn
+    Export:
+      Name: !Sub "${ClusterName}-EksSecretsKeyArn"
+  EbsKeyArn:
+    Value: !GetAtt EbsKey.Arn
+    Export:
+      Name: !Sub "${ClusterName}-EbsKeyArn"
+  RdsKeyArn:
+    Value: !GetAtt RdsKey.Arn
+    Export:
+      Name: !Sub "${ClusterName}-RdsKeyArn"
+  S3KeyArn:
+    Value: !GetAtt S3Key.Arn
+    Export:
+      Name: !Sub "${ClusterName}-S3KeyArn"
+  SqsKeyArn:
+    Value: !GetAtt SqsKey.Arn
+    Export:
+      Name: !Sub "${ClusterName}-SqsKeyArn"
+  SecretsKeyArn:
+    Value: !GetAtt SecretsKey.Arn
+    Export:
+      Name: !Sub "${ClusterName}-SecretsKeyArn"

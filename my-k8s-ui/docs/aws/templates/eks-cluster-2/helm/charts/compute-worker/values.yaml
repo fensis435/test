@@ -1,0 +1,66 @@
+# =============================================================================
+# compute-worker/values.yaml
+# Karpenter で動的起動される計算Podの設定
+# =============================================================================
+
+image:
+  repository: ""
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  name: compute-job
+
+# Karpenterがスケジュールするため固定replicas設定なし
+# CronJob / Job / Deployment を使い分ける
+jobMode:
+  enabled: false            # true: Job, false: Deployment
+
+replicaCount: 0             # Karpenterが動的制御するため初期0
+
+resources:
+  requests:
+    cpu: "2"
+    memory: 8Gi
+  limits:
+    cpu: "8"
+    memory: 32Gi
+
+# Karpenter管理ノードにスケジュール
+nodeSelector:
+  role: compute
+
+tolerations: []
+
+# GPU利用時
+gpuEnabled: false
+
+env:
+  AWS_REGION: "ap-northeast-1"
+  DATABASE_HOST: ""
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "appdb"
+  S3_DATA_BUCKET: ""
+  EFS_MOUNT_PATH: "/data/shared"
+
+persistence:
+  ebs:
+    enabled: true
+    storageClass: ebs-sc
+    size: 100Gi
+    mountPath: /data/local
+  efs:
+    enabled: true
+    mountPath: /data/shared
+    claimName: efs-shared-pvc   # 静的PVC (EFSは共有)
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]

@@ -1,0 +1,387 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CodeBuild プロジェクト - GitOps CI/CD (Helm Package + Docker Build + ECR Push)"
+
+Parameters:
+  ClusterName:
+    Type: String
+  CodeBuildRoleArn:
+    Type: String
+  AppEcrUri:
+    Type: String
+  RailsEcrUri:
+    Type: String
+  BuildEcrUri:
+    Type: String
+  HelmBucket:
+    Type: String
+  CodeArtifactDomain:
+    Type: String
+  CodeArtifactRepo:
+    Type: String
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  EksSubnet1:
+    Type: AWS::EC2::Subnet::Id
+  EksSubnet2:
+    Type: AWS::EC2::Subnet::Id
+  GitopsRepoUrl:
+    Type: String
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # CodeBuild セキュリティグループ
+  # ---------------------------------------------------------------------------
+  CodeBuildSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "CodeBuild Security Group"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-codebuild-sg"
+
+  # ---------------------------------------------------------------------------
+  # ビルドイメージ用 CodeBuild プロジェクト (Ubuntu 24 ベース)
+  # ---------------------------------------------------------------------------
+  BuildBaseImageProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ClusterName}-build-base-image"
+      Description: "Ubuntu24ベースのビルドコンテナイメージをビルドしECRへプッシュ"
+      ServiceRole: !Ref CodeBuildRoleArn
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: BUILD_ECR_URI
+            Value: !Ref BuildEcrUri
+          - Name: CODEARTIFACT_DOMAIN
+            Value: !Ref CodeArtifactDomain
+          - Name: CODEARTIFACT_REPO
+            Value: !Ref CodeArtifactRepo
+      Source:
+        Type: CODECOMMIT
+        Location: !Ref GitopsRepoUrl
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - echo "Logging in to ECR..."
+                - aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
+                    docker login --username AWS --password-stdin \
+                    $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+                - CODEARTIFACT_TOKEN=$(aws codeartifact get-authorization-token \
+                    --domain $CODEARTIFACT_DOMAIN \
+                    --query authorizationToken --output text)
+                - IMAGE_TAG=ubuntu24-$(date +%Y%m%d%H%M%S)
+            build:
+              commands:
+                - echo "Building base build image..."
+                - |
+                  docker build \
+                    --build-arg CODEARTIFACT_TOKEN=$CODEARTIFACT_TOKEN \
+                    --build-arg CODEARTIFACT_DOMAIN=$CODEARTIFACT_DOMAIN \
+                    --build-arg CODEARTIFACT_REPO=$CODEARTIFACT_REPO \
+                    --build-arg AWS_REGION=$AWS_DEFAULT_REGION \
+                    --build-arg AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID \
+                    -t $BUILD_ECR_URI:$IMAGE_TAG \
+                    -t $BUILD_ECR_URI:latest \
+                    -f dockerfiles/Dockerfile.build .
+                - docker push $BUILD_ECR_URI:$IMAGE_TAG
+                - docker push $BUILD_ECR_URI:latest
+      VpcConfig:
+        VpcId: !Ref VpcId
+        Subnets: [!Ref EksSubnet1, !Ref EksSubnet2]
+        SecurityGroupIds: [!Ref CodeBuildSg]
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Sub "/aws/codebuild/${ClusterName}-build-base-image"
+
+  # ---------------------------------------------------------------------------
+  # アプリビルド CodeBuild (AlmaLinux9ベース, GitOps差分検出)
+  # ---------------------------------------------------------------------------
+  AppBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ClusterName}-app-build"
+      Description: "アプリコンテナ(AlmaLinux9)ビルド + ECRプッシュ (GitOps差分検出)"
+      ServiceRole: !Ref CodeBuildRoleArn
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: !Sub "${BuildEcrUri}:latest"
+        ImagePullCredentialsType: SERVICE_ROLE
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: APP_ECR_URI
+            Value: !Ref AppEcrUri
+          - Name: HELM_BUCKET
+            Value: !Ref HelmBucket
+          - Name: CODEARTIFACT_DOMAIN
+            Value: !Ref CodeArtifactDomain
+          - Name: CODEARTIFACT_REPO
+            Value: !Ref CodeArtifactRepo
+          - Name: CLUSTER_NAME
+            Value: !Ref ClusterName
+      Source:
+        Type: CODECOMMIT
+        Location: !Ref GitopsRepoUrl
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - echo "Setting up CodeArtifact..."
+                - export CODEARTIFACT_TOKEN=$(aws codeartifact get-authorization-token \
+                    --domain $CODEARTIFACT_DOMAIN \
+                    --query authorizationToken --output text)
+                - export CODEARTIFACT_ENDPOINT=$(aws codeartifact get-repository-endpoint \
+                    --domain $CODEARTIFACT_DOMAIN \
+                    --repository $CODEARTIFACT_REPO \
+                    --format pypi --query repositoryEndpoint --output text)
+                # dnf リポジトリを CodeArtifact/S3 に向ける (dnf proxy設定)
+                # pip を CodeArtifact に向ける
+                - pip config set global.index-url \
+                    "https://aws:$CODEARTIFACT_TOKEN@${CODEARTIFACT_ENDPOINT}simple/"
+                # npm を CodeArtifact に向ける
+                - export NPM_ENDPOINT=$(aws codeartifact get-repository-endpoint \
+                    --domain $CODEARTIFACT_DOMAIN \
+                    --repository $CODEARTIFACT_REPO \
+                    --format npm --query repositoryEndpoint --output text)
+                - npm config set registry $NPM_ENDPOINT
+                - npm config set "//${NPM_ENDPOINT#https://}:_authToken" $CODEARTIFACT_TOKEN
+                # RubyGems を CodeArtifact に向ける
+                - export GEM_ENDPOINT=$(aws codeartifact get-repository-endpoint \
+                    --domain $CODEARTIFACT_DOMAIN \
+                    --repository $CODEARTIFACT_REPO \
+                    --format ruby-gems-org --query repositoryEndpoint --output text 2>/dev/null || echo "")
+            pre_build:
+              commands:
+                - echo "Login to ECR..."
+                - aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
+                    docker login --username AWS --password-stdin \
+                    $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+                # GitOps差分検出: 変更されたサービスのみビルド
+                - CHANGED_SERVICES=$(git diff --name-only HEAD~1 HEAD | \
+                    grep '^apps/' | cut -d/ -f2 | sort -u)
+                - echo "Changed services: $CHANGED_SERVICES"
+                - IMAGE_TAG=$(git rev-parse --short HEAD)
+            build:
+              commands:
+                - |
+                  for SERVICE in $CHANGED_SERVICES; do
+                    if [ -f "apps/$SERVICE/Dockerfile" ]; then
+                      echo "Building $SERVICE..."
+                      docker build \
+                        --build-arg CODEARTIFACT_TOKEN=$CODEARTIFACT_TOKEN \
+                        --build-arg CODEARTIFACT_DOMAIN=$CODEARTIFACT_DOMAIN \
+                        --build-arg AWS_REGION=$AWS_DEFAULT_REGION \
+                        --build-arg AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID \
+                        -t $APP_ECR_URI/$SERVICE:$IMAGE_TAG \
+                        -t $APP_ECR_URI/$SERVICE:latest \
+                        apps/$SERVICE/
+                      docker push $APP_ECR_URI/$SERVICE:$IMAGE_TAG
+                      docker push $APP_ECR_URI/$SERVICE:latest
+                    fi
+                  done
+            post_build:
+              commands:
+                # Helm chart パッケージ化 & S3にプッシュ
+                - |
+                  for CHART_DIR in helm/charts/*/; do
+                    CHART_NAME=$(basename $CHART_DIR)
+                    if git diff --name-only HEAD~1 HEAD | grep -q "^helm/charts/$CHART_NAME/"; then
+                      echo "Packaging Helm chart: $CHART_NAME"
+                      helm dependency update $CHART_DIR
+                      helm package $CHART_DIR --destination /tmp/helm-packages/
+                      aws s3 cp /tmp/helm-packages/*.tgz \
+                        s3://$HELM_BUCKET/charts/
+                    fi
+                  done
+                # Helm repo index 更新
+                - aws s3 sync s3://$HELM_BUCKET/charts/ /tmp/helm-index/
+                - helm repo index /tmp/helm-index/ \
+                    --url s3://$HELM_BUCKET/charts/
+                - aws s3 cp /tmp/helm-index/index.yaml \
+                    s3://$HELM_BUCKET/charts/index.yaml
+                # ArgoCD Application 更新 (イメージタグを更新)
+                - |
+                  for SERVICE in $CHANGED_SERVICES; do
+                    if [ -f "gitops/apps/$SERVICE/values.yaml" ]; then
+                      sed -i "s|tag:.*|tag: $IMAGE_TAG|g" \
+                        gitops/apps/$SERVICE/values.yaml
+                    fi
+                  done
+                - git config user.email "codebuild@ci"
+                - git config user.name "CodeBuild"
+                - git add gitops/
+                - git diff --staged --quiet || \
+                    git commit -m "[ci] Update image tags to $IMAGE_TAG"
+                - git push origin HEAD
+      VpcConfig:
+        VpcId: !Ref VpcId
+        Subnets: [!Ref EksSubnet1, !Ref EksSubnet2]
+        SecurityGroupIds: [!Ref CodeBuildSg]
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Sub "/aws/codebuild/${ClusterName}-app-build"
+
+  # ---------------------------------------------------------------------------
+  # Rails ビルド CodeBuild
+  # ---------------------------------------------------------------------------
+  RailsBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ClusterName}-rails-build"
+      Description: "Rails v8 アプリコンテナビルド"
+      ServiceRole: !Ref CodeBuildRoleArn
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: !Sub "${BuildEcrUri}:latest"
+        ImagePullCredentialsType: SERVICE_ROLE
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: RAILS_ECR_URI
+            Value: !Ref RailsEcrUri
+          - Name: CODEARTIFACT_DOMAIN
+            Value: !Ref CodeArtifactDomain
+          - Name: CODEARTIFACT_REPO
+            Value: !Ref CodeArtifactRepo
+      Source:
+        Type: CODECOMMIT
+        Location: !Ref GitopsRepoUrl
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - export CODEARTIFACT_TOKEN=$(aws codeartifact get-authorization-token \
+                    --domain $CODEARTIFACT_DOMAIN \
+                    --query authorizationToken --output text)
+                # Bundler を CodeArtifact に向ける
+                - export GEM_ENDPOINT=$(aws codeartifact get-repository-endpoint \
+                    --domain $CODEARTIFACT_DOMAIN \
+                    --repository $CODEARTIFACT_REPO-gems \
+                    --format ruby-gems-org --query repositoryEndpoint --output text 2>/dev/null || echo "")
+                - |
+                  if [ -n "$GEM_ENDPOINT" ]; then
+                    bundle config mirror.https://rubygems.org $GEM_ENDPOINT
+                    bundle config $GEM_ENDPOINT \
+                      "aws:$CODEARTIFACT_TOKEN"
+                  fi
+            pre_build:
+              commands:
+                - aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
+                    docker login --username AWS --password-stdin \
+                    $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+                - IMAGE_TAG=$(git rev-parse --short HEAD)
+            build:
+              commands:
+                - echo "Building Rails app..."
+                - |
+                  docker build \
+                    --build-arg RAILS_ENV=production \
+                    --build-arg CODEARTIFACT_TOKEN=$CODEARTIFACT_TOKEN \
+                    --build-arg CODEARTIFACT_DOMAIN=$CODEARTIFACT_DOMAIN \
+                    --build-arg AWS_REGION=$AWS_DEFAULT_REGION \
+                    -t $RAILS_ECR_URI:$IMAGE_TAG \
+                    -t $RAILS_ECR_URI:latest \
+                    -f apps/rails/Dockerfile .
+                - docker push $RAILS_ECR_URI:$IMAGE_TAG
+                - docker push $RAILS_ECR_URI:latest
+            post_build:
+              commands:
+                - echo "Rails build complete. Tag=$IMAGE_TAG"
+      VpcConfig:
+        VpcId: !Ref VpcId
+        Subnets: [!Ref EksSubnet1, !Ref EksSubnet2]
+        SecurityGroupIds: [!Ref CodeBuildSg]
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Sub "/aws/codebuild/${ClusterName}-rails-build"
+
+  # ---------------------------------------------------------------------------
+  # EventBridge: CodeCommit push -> CodeBuild trigger
+  # ---------------------------------------------------------------------------
+  CodeCommitPushRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ClusterName}-codecommit-push"
+      EventPattern:
+        source:
+          - "aws.codecommit"
+        detail-type:
+          - "CodeCommit Repository State Change"
+        detail:
+          event:
+            - "referenceUpdated"
+          referenceName:
+            - "main"
+      State: ENABLED
+      Targets:
+        - Id: "app-build"
+          Arn: !GetAtt AppBuildProject.Arn
+          RoleArn: !GetAtt EventsCodeBuildRole.Arn
+
+  EventsCodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartBuild
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: codebuild:StartBuild
+                Resource:
+                  - !GetAtt AppBuildProject.Arn
+                  - !GetAtt RailsBuildProject.Arn
+
+Outputs:
+  AppBuildProjectName:
+    Value: !Ref AppBuildProject
+    Export:
+      Name: !Sub "${ClusterName}-AppBuildProjectName"
+  RailsBuildProjectName:
+    Value: !Ref RailsBuildProject
+    Export:
+      Name: !Sub "${ClusterName}-RailsBuildProjectName"
+  BuildBaseImageProjectName:
+    Value: !Ref BuildBaseImageProject
+    Export:
+      Name: !Sub "${ClusterName}-BuildBaseImageProjectName"

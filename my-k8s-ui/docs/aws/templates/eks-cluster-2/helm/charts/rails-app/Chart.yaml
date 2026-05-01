@@ -1,0 +1,8 @@
+apiVersion: v2
+name: rails-app
+description: "Rails v8 管理アプリ - WebUI / ユーザ管理 / Cognito JWT認証"
+type: application
+version: 0.1.0
+appVersion: "8.0.0"
+
+dependencies: []

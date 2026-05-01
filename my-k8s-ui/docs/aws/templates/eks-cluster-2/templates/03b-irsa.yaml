@@ -1,0 +1,537 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "IRSA (IAM Roles for Service Accounts) - EKSアドオン・アプリ用"
+
+Parameters:
+  ClusterName:
+    Type: String
+  OidcProviderArn:
+    Type: String
+  OidcProviderId:
+    Type: String
+    Description: "OIDC provider ID (URL without https://)"
+  AccountId:
+    Type: String
+  Region:
+    Type: String
+  EfsId:
+    Type: String
+  HelmBucket:
+    Type: String
+  UserEventsQueueArn:
+    Type: String
+  KmsEbsKeyArn:
+    Type: String
+  KmsS3KeyArn:
+    Type: String
+  KmsSqsKeyArn:
+    Type: String
+  RdsClustedId:
+    Type: String
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Karpenter IRSA
+  # ---------------------------------------------------------------------------
+  KarpenterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-karpenter"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                !Sub "${OidcProviderId}:sub": "system:serviceaccount:karpenter:karpenter"
+                !Sub "${OidcProviderId}:aud": "sts.amazonaws.com"
+
+  KarpenterPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${ClusterName}-karpenter-policy"
+      Roles: [!Ref KarpenterRole]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "AllowScopedEC2InstanceActions"
+            Effect: Allow
+            Action:
+              - ec2:RunInstances
+              - ec2:CreateFleet
+            Resource:
+              - !Sub "arn:aws:ec2:${Region}::image/*"
+              - !Sub "arn:aws:ec2:${Region}::snapshot/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:spot-instances-request/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:security-group/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:subnet/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:launch-template/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:volume/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:network-interface/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:instance/*"
+          - Sid: "AllowScopedEC2InstanceActionsWithTags"
+            Effect: Allow
+            Action:
+              - ec2:RunInstances
+              - ec2:CreateFleet
+              - ec2:CreateLaunchTemplate
+            Resource:
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:fleet/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:instance/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:volume/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:network-interface/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:launch-template/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:spot-instances-request/*"
+            Condition:
+              StringEquals:
+                !Sub "aws:RequestTag/kubernetes.io/cluster/${ClusterName}": owned
+          - Sid: "AllowScopedResourceCreationTagging"
+            Effect: Allow
+            Action: ec2:CreateTags
+            Resource:
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:fleet/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:instance/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:volume/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:network-interface/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:launch-template/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:spot-instances-request/*"
+            Condition:
+              StringEquals:
+                ec2:CreateAction:
+                  - RunInstances
+                  - CreateFleet
+                  - CreateLaunchTemplate
+          - Sid: "AllowScopedDeletion"
+            Effect: Allow
+            Action:
+              - ec2:TerminateInstances
+              - ec2:DeleteLaunchTemplate
+            Resource:
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:instance/*"
+              - !Sub "arn:aws:ec2:${Region}:${AccountId}:launch-template/*"
+            Condition:
+              StringEquals:
+                !Sub "aws:ResourceTag/kubernetes.io/cluster/${ClusterName}": owned
+          - Sid: "AllowRegionalReadActions"
+            Effect: Allow
+            Action:
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeImages
+              - ec2:DescribeInstances
+              - ec2:DescribeInstanceTypeOfferings
+              - ec2:DescribeInstanceTypes
+              - ec2:DescribeLaunchTemplates
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeSpotPriceHistory
+              - ec2:DescribeSubnets
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: !Ref Region
+          - Sid: "AllowSSMReadActions"
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub "arn:aws:ssm:${Region}::parameter/aws/service/*"
+          - Sid: "AllowIAMPassNodeRole"
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !Sub "arn:aws:iam::${AccountId}:role/${ClusterName}-eks-node-role"
+            Condition:
+              StringEquals:
+                iam:PassedToService: ec2.amazonaws.com
+          - Sid: "AllowInstanceProfileActions"
+            Effect: Allow
+            Action:
+              - iam:AddRoleToInstanceProfile
+              - iam:CreateInstanceProfile
+              - iam:DeleteInstanceProfile
+              - iam:GetInstanceProfile
+              - iam:RemoveRoleFromInstanceProfile
+              - iam:TagInstanceProfile
+            Resource: !Sub "arn:aws:iam::${AccountId}:instance-profile/${ClusterName}-*"
+          - Sid: "AllowAPIServerEndpointDiscovery"
+            Effect: Allow
+            Action: eks:DescribeCluster
+            Resource: !Sub "arn:aws:eks:${Region}:${AccountId}:cluster/${ClusterName}"
+          - Sid: "AllowInterruptionQueueActions"
+            Effect: Allow
+            Action:
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ReceiveMessage
+            Resource: !Sub "arn:aws:sqs:${Region}:${AccountId}:${ClusterName}-karpenter"
+          - Sid: "KMSForEBS"
+            Effect: Allow
+            Action:
+              - kms:CreateGrant
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:GenerateDataKey*
+            Resource: !Ref KmsEbsKeyArn
+
+  # ---------------------------------------------------------------------------
+  # EBS CSI Driver IRSA
+  # ---------------------------------------------------------------------------
+  EbsCsiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-ebs-csi"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                !Sub "${OidcProviderId}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+                !Sub "${OidcProviderId}:aud": "sts.amazonaws.com"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+
+  EbsCsiKmsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${ClusterName}-ebs-csi-kms"
+      Roles: [!Ref EbsCsiRole]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - kms:CreateGrant
+              - kms:ListGrants
+              - kms:RevokeGrant
+            Resource: !Ref KmsEbsKeyArn
+            Condition:
+              Bool:
+                kms:GrantIsForAWSResource: "true"
+          - Effect: Allow
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: !Ref KmsEbsKeyArn
+
+  # ---------------------------------------------------------------------------
+  # EFS CSI Driver IRSA
+  # ---------------------------------------------------------------------------
+  EfsCsiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-efs-csi"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                !Sub "${OidcProviderId}:sub": "system:serviceaccount:kube-system:efs-csi-controller-sa"
+                !Sub "${OidcProviderId}:aud": "sts.amazonaws.com"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEFSCSIDriverPolicy
+
+  # ---------------------------------------------------------------------------
+  # AWS Load Balancer Controller IRSA
+  # ---------------------------------------------------------------------------
+  LbcRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-lbc"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                !Sub "${OidcProviderId}:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller"
+                !Sub "${OidcProviderId}:aud": "sts.amazonaws.com"
+
+  LbcPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${ClusterName}-lbc-policy"
+      Roles: [!Ref LbcRole]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: "*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName: "elasticloadbalancing.amazonaws.com"
+          - Effect: Allow
+            Action:
+              - ec2:DescribeAccountAttributes
+              - ec2:DescribeAddresses
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeInternetGateways
+              - ec2:DescribeVpcs
+              - ec2:DescribeVpcPeeringConnections
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeInstances
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeTags
+              - ec2:GetCoipPoolUsage
+              - ec2:DescribeCoipPools
+              - elasticloadbalancing:DescribeLoadBalancers
+              - elasticloadbalancing:DescribeLoadBalancerAttributes
+              - elasticloadbalancing:DescribeListeners
+              - elasticloadbalancing:DescribeListenerCertificates
+              - elasticloadbalancing:DescribeSSLPolicies
+              - elasticloadbalancing:DescribeRules
+              - elasticloadbalancing:DescribeTargetGroups
+              - elasticloadbalancing:DescribeTargetGroupAttributes
+              - elasticloadbalancing:DescribeTargetHealth
+              - elasticloadbalancing:DescribeTags
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - cognito-idp:DescribeUserPoolClient
+              - acm:ListCertificates
+              - acm:DescribeCertificate
+              - iam:ListServerCertificates
+              - iam:GetServerCertificate
+              - waf-regional:GetWebACL
+              - wafv2:GetWebACL
+              - wafv2:GetWebACLForResource
+              - shield:GetSubscriptionState
+              - shield:DescribeProtection
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:CreateSecurityGroup
+              - ec2:CreateTags
+              - ec2:DeleteTags
+              - ec2:ModifyNetworkInterfaceAttribute
+              - ec2:DeleteSecurityGroup
+              - elasticloadbalancing:*
+            Resource: "*"
+
+  # ---------------------------------------------------------------------------
+  # ArgoCD IRSA (CodeCommit / S3 Helm charts アクセス)
+  # ---------------------------------------------------------------------------
+  ArgoCdRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-argocd"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringLike:
+                !Sub "${OidcProviderId}:sub": "system:serviceaccount:argocd:argocd-*"
+                !Sub "${OidcProviderId}:aud": "sts.amazonaws.com"
+
+  ArgoCdPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${ClusterName}-argocd-policy"
+      Roles: [!Ref ArgoCdRole]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "S3HelmAccess"
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::${HelmBucket}"
+              - !Sub "arn:aws:s3:::${HelmBucket}/*"
+          - Sid: "CodeCommitAccess"
+            Effect: Allow
+            Action:
+              - codecommit:GitPull
+              - codecommit:GetRepository
+              - codecommit:ListRepositories
+            Resource: !Sub "arn:aws:codecommit:${Region}:${AccountId}:*"
+          - Sid: "ECRReadOnly"
+            Effect: Allow
+            Action:
+              - ecr:GetAuthorizationToken
+              - ecr:BatchCheckLayerAvailability
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+            Resource: "*"
+
+  # ---------------------------------------------------------------------------
+  # Rails アプリ IRSA (RDS IAM auth, S3, SQS, Cognito)
+  # ---------------------------------------------------------------------------
+  RailsAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-rails-app"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                !Sub "${OidcProviderId}:sub": "system:serviceaccount:app:rails-app"
+                !Sub "${OidcProviderId}:aud": "sts.amazonaws.com"
+
+  RailsAppPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${ClusterName}-rails-app-policy"
+      Roles: [!Ref RailsAppRole]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "RdsIamConnect"
+            Effect: Allow
+            Action:
+              - rds-db:connect
+            Resource: !Sub "arn:aws:rds-db:${Region}:${AccountId}:dbuser:*/${RdsClustedId}"
+          - Sid: "SecretsManagerRead"
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:DescribeSecret
+            Resource: !Sub "arn:aws:secretsmanager:${Region}:${AccountId}:secret:${ClusterName}/*"
+          - Sid: "SQSUserEvents"
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+            Resource: !Ref UserEventsQueueArn
+          - Sid: "SQSKms"
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: !Ref KmsSqsKeyArn
+          - Sid: "CognitoAdmin"
+            Effect: Allow
+            Action:
+              - cognito-idp:AdminCreateUser
+              - cognito-idp:AdminDeleteUser
+              - cognito-idp:AdminUpdateUserAttributes
+              - cognito-idp:AdminGetUser
+              - cognito-idp:ListUsers
+              - cognito-idp:AdminResetUserPassword
+              - cognito-idp:AdminSetUserPassword
+              - cognito-idp:AdminAddUserToGroup
+              - cognito-idp:AdminRemoveUserFromGroup
+            Resource: !Sub "arn:aws:cognito-idp:${Region}:${AccountId}:userpool/*"
+          - Sid: "S3AppAccess"
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::${ClusterName}-app-data"
+              - !Sub "arn:aws:s3:::${ClusterName}-app-data/*"
+          - Sid: "S3KMS"
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: !Ref KmsS3KeyArn
+
+  # ---------------------------------------------------------------------------
+  # 計算ジョブ Pod IRSA (S3, EFS, Secrets)
+  # ---------------------------------------------------------------------------
+  ComputeJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-compute-job"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref OidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                !Sub "${OidcProviderId}:sub": "system:serviceaccount:compute:compute-job"
+                !Sub "${OidcProviderId}:aud": "sts.amazonaws.com"
+
+  ComputeJobPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${ClusterName}-compute-job-policy"
+      Roles: [!Ref ComputeJobRole]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "S3DataReadWrite"
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::${ClusterName}-compute-data"
+              - !Sub "arn:aws:s3:::${ClusterName}-compute-data/*"
+          - Sid: "SecretsRead"
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: !Sub "arn:aws:secretsmanager:${Region}:${AccountId}:secret:${ClusterName}/compute/*"
+          - Sid: "RdsConnect"
+            Effect: Allow
+            Action:
+              - rds-db:connect
+            Resource: !Sub "arn:aws:rds-db:${Region}:${AccountId}:dbuser:*/${RdsClustedId}"
+
+Outputs:
+  KarpenterRoleArn:
+    Value: !GetAtt KarpenterRole.Arn
+    Export:
+      Name: !Sub "${ClusterName}-KarpenterRoleArn"
+  EbsCsiRoleArn:
+    Value: !GetAtt EbsCsiRole.Arn
+    Export:
+      Name: !Sub "${ClusterName}-EbsCsiRoleArn"
+  EfsCsiRoleArn:
+    Value: !GetAtt EfsCsiRole.Arn
+    Export:
+      Name: !Sub "${ClusterName}-EfsCsiRoleArn"
+  LbcRoleArn:
+    Value: !GetAtt LbcRole.Arn
+    Export:
+      Name: !Sub "${ClusterName}-LbcRoleArn"
+  ArgoCdRoleArn:
+    Value: !GetAtt ArgoCdRole.Arn
+    Export:
+      Name: !Sub "${ClusterName}-ArgoCdRoleArn"
+  RailsAppRoleArn:
+    Value: !GetAtt RailsAppRole.Arn
+    Export:
+      Name: !Sub "${ClusterName}-RailsAppRoleArn"
+  ComputeJobRoleArn:
+    Value: !GetAtt ComputeJobRole.Arn
+    Export:
+      Name: !Sub "${ClusterName}-ComputeJobRoleArn"

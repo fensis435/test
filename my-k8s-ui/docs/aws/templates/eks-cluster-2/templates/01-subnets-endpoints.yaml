@@ -1,0 +1,521 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  EKS用 プライベートサブネット(2) + VPCエンドポイント専用サブネット(1) +
+  全インターフェース型VPCエンドポイント + セキュリティグループ
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  ClusterName:
+    Type: String
+  EksSubnet1Cidr:
+    Type: String
+    Default: "10.0.10.0/24"
+  EksSubnet2Cidr:
+    Type: String
+    Default: "10.0.11.0/24"
+  EndpointSubnetCidr:
+    Type: String
+    Default: "10.0.12.0/24"
+  Az1:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: "ap-northeast-1a"
+  Az2:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: "ap-northeast-1c"
+  ExistingS3EndpointId:
+    Type: String
+    Description: "既存のS3 Gateway VPC Endpoint ID"
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # ルートテーブル
+  # ---------------------------------------------------------------------------
+  EksSubnet1RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-eks-subnet1-rtb"
+
+  EksSubnet2RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-eks-subnet2-rtb"
+
+  EndpointSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-endpoint-subnet-rtb"
+
+  # ---------------------------------------------------------------------------
+  # サブネット
+  # ---------------------------------------------------------------------------
+  EksSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: !Ref EksSubnet1Cidr
+      AvailabilityZone: !Ref Az1
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-eks-subnet-1"
+        - Key: !Sub "kubernetes.io/cluster/${ClusterName}"
+          Value: owned
+        - Key: kubernetes.io/role/internal-elb
+          Value: "1"
+
+  EksSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: !Ref EksSubnet2Cidr
+      AvailabilityZone: !Ref Az2
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-eks-subnet-2"
+        - Key: !Sub "kubernetes.io/cluster/${ClusterName}"
+          Value: owned
+        - Key: kubernetes.io/role/internal-elb
+          Value: "1"
+
+  EndpointSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: !Ref EndpointSubnetCidr
+      AvailabilityZone: !Ref Az1
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-endpoint-subnet"
+
+  # ---------------------------------------------------------------------------
+  # サブネット <-> ルートテーブル 関連付け
+  # ---------------------------------------------------------------------------
+  EksSubnet1RtbAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref EksSubnet1
+      RouteTableId: !Ref EksSubnet1RouteTable
+
+  EksSubnet2RtbAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref EksSubnet2
+      RouteTableId: !Ref EksSubnet2RouteTable
+
+  EndpointSubnetRtbAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref EndpointSubnet
+      RouteTableId: !Ref EndpointSubnetRouteTable
+
+  # ---------------------------------------------------------------------------
+  # セキュリティグループ
+  # ---------------------------------------------------------------------------
+  VpcEndpointSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "VPC Endpoint Security Group"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Select [0, !Cidr [!GetAtt VpcInfo.CidrBlock, 1, 8]]
+          Description: "HTTPS from VPC"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-vpce-sg"
+
+  # VPC CIDR取得用カスタムリソース代替: 直接VPC CIDRをパラメータで受け取る方がシンプル
+  # ここではセキュリティグループのIngressをVPC全体からとする
+  VpcEndpointSgSimple:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "VPC Endpoints - allow HTTPS from VPC CIDR"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "10.0.0.0/8"
+          Description: "HTTPS from internal"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-vpce-sg"
+
+  EksClusterSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "EKS Cluster Security Group"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "10.0.0.0/8"
+          Description: "k8s API from internal"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-cluster-sg"
+
+  NodeSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "EKS Node Security Group"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: "-1"
+          SourceSecurityGroupId: !Ref EksClusterSg
+          Description: "Allow all from EKS cluster SG"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-node-sg"
+        - Key: !Sub "kubernetes.io/cluster/${ClusterName}"
+          Value: owned
+
+  # Node同士通信
+  NodeSgSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSg
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref NodeSg
+      Description: "Node to Node all traffic"
+
+  # Cluster -> Node
+  ClusterToNodeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSg
+      IpProtocol: tcp
+      FromPort: 1025
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref EksClusterSg
+      Description: "Cluster control plane to worker node groups"
+
+  ClusterToNodeHttps:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSg
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref EksClusterSg
+      Description: "Cluster control plane to node webhooks"
+
+  RdsSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "RDS Security Group"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref NodeSg
+          Description: "PostgreSQL from EKS nodes"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-rds-sg"
+
+  EfsSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "EFS Security Group"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref NodeSg
+          Description: "NFS from EKS nodes"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterName}-efs-sg"
+
+  # ---------------------------------------------------------------------------
+  # Interface VPC Endpoints (全てEndpointSubnetに配置)
+  # ---------------------------------------------------------------------------
+  VpceEcr:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceEcrDkr:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceEc2:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceEks:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.eks"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceEfs:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.elasticfilesystem"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceKms:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.kms"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceSts:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sts"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceSecretsManager:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.secretsmanager"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceSqs:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sqs"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceCloudWatchLogs:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceCloudWatchMonitoring:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.monitoring"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceCodeBuild:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.codebuild"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceCodeArtifact:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.codeartifact.api"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceCodeArtifactRepositories:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.codeartifact.repositories"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceAcm:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.acm"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceCloudTrail:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.cloudtrail"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceAutoScaling:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.autoscaling"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceElb:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.elasticloadbalancing"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  # SSM系 (新サブネット用追加 - 既存エンドポイントのサブネット追加はコンソール/CLI操作が必要なため
+  # 新規作成で対応。既存と重複する場合はコメントアウト)
+  VpceSsm:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceSsmMessages:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+  VpceEc2Messages:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2messages"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref EndpointSubnet]
+      SecurityGroupIds: [!Ref VpcEndpointSgSimple]
+      PrivateDnsEnabled: true
+
+Outputs:
+  EksSubnet1Id:
+    Value: !Ref EksSubnet1
+    Export:
+      Name: !Sub "${ClusterName}-EksSubnet1Id"
+  EksSubnet2Id:
+    Value: !Ref EksSubnet2
+    Export:
+      Name: !Sub "${ClusterName}-EksSubnet2Id"
+  EndpointSubnetId:
+    Value: !Ref EndpointSubnet
+    Export:
+      Name: !Sub "${ClusterName}-EndpointSubnetId"
+  EksClusterSgId:
+    Value: !Ref EksClusterSg
+    Export:
+      Name: !Sub "${ClusterName}-EksClusterSgId"
+  NodeSgId:
+    Value: !Ref NodeSg
+    Export:
+      Name: !Sub "${ClusterName}-NodeSgId"
+  RdsSgId:
+    Value: !Ref RdsSg
+    Export:
+      Name: !Sub "${ClusterName}-RdsSgId"
+  EfsSgId:
+    Value: !Ref EfsSg
+    Export:
+      Name: !Sub "${ClusterName}-EfsSgId"
+  VpceEndpointSgId:
+    Value: !Ref VpcEndpointSgSimple
+    Export:
+      Name: !Sub "${ClusterName}-VpceEndpointSgId"
+  EksSubnet1RouteTableId:
+    Value: !Ref EksSubnet1RouteTable
+    Export:
+      Name: !Sub "${ClusterName}-EksSubnet1RouteTableId"
+  EksSubnet2RouteTableId:
+    Value: !Ref EksSubnet2RouteTable
+    Export:
+      Name: !Sub "${ClusterName}-EksSubnet2RouteTableId"

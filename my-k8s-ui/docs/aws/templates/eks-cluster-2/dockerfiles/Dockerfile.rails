@@ -1,0 +1,158 @@
+# =============================================================================
+# Dockerfile.rails - Rails v8 管理アプリ
+# ベース: AlmaLinux 9
+# 機能: WebUI / ユーザ管理 / Cognito JWT認証 / SQS連携
+# =============================================================================
+
+# ---- ビルドステージ ----
+FROM almalinux:9 AS builder
+
+ARG RAILS_ENV=production
+ARG CODEARTIFACT_TOKEN
+ARG CODEARTIFACT_DOMAIN
+ARG AWS_REGION=ap-northeast-1
+ARG AWS_ACCOUNT_ID
+ARG BUNDLER_VERSION=2.5.23
+ARG RUBY_VERSION=3.3
+
+ENV RAILS_ENV=${RAILS_ENV} \
+    BUNDLE_DEPLOYMENT=1 \
+    BUNDLE_WITHOUT="development test" \
+    BUNDLE_PATH=/usr/local/bundle \
+    LANG=ja_JP.UTF-8 \
+    LC_ALL=ja_JP.UTF-8 \
+    TZ=Asia/Tokyo
+
+# ---------------------------------------------------------------------------
+# システムパッケージ (dnf - CodeArtifact/S3 mirrorlist設定後)
+# ---------------------------------------------------------------------------
+RUN dnf update -y && dnf install -y \
+    # ビルド依存
+    gcc \
+    gcc-c++ \
+    make \
+    git \
+    curl \
+    wget \
+    unzip \
+    # Ruby依存
+    ruby \
+    ruby-devel \
+    rubygems \
+    # PostgreSQL クライアント
+    libpq-devel \
+    postgresql \
+    # 画像処理 (Active Storage)
+    ImageMagick \
+    ImageMagick-devel \
+    # 暗号化
+    openssl \
+    openssl-devel \
+    # 国際化
+    glibc-langpack-ja \
+    # Node.js (assets precompile)
+    nodejs \
+    npm \
+  && dnf clean all \
+  && localedef -f UTF-8 -i ja_JP ja_JP.UTF-8
+
+# Bundler インストール (CodeArtifact経由 or デフォルト)
+RUN if [ -n "${CODEARTIFACT_TOKEN}" ] && [ -n "${CODEARTIFACT_DOMAIN}" ]; then \
+      GEM_ENDPOINT="https://${CODEARTIFACT_DOMAIN}-${AWS_ACCOUNT_ID}.d.codeartifact.${AWS_REGION}.amazonaws.com/ruby/$(echo ${CODEARTIFACT_DOMAIN})-gems/" && \
+      gem sources --remove https://rubygems.org/ 2>/dev/null || true && \
+      gem sources --add "https://aws:${CODEARTIFACT_TOKEN}@${GEM_ENDPOINT#https://}" && \
+      gem install bundler:${BUNDLER_VERSION} --no-document; \
+    else \
+      gem install bundler:${BUNDLER_VERSION} --no-document; \
+    fi
+
+WORKDIR /app
+
+# Gemfile を先にコピーしてレイヤーキャッシュを活用
+COPY Gemfile Gemfile.lock ./
+
+RUN if [ -n "${CODEARTIFACT_TOKEN}" ] && [ -n "${CODEARTIFACT_DOMAIN}" ]; then \
+      GEM_ENDPOINT="https://${CODEARTIFACT_DOMAIN}-${AWS_ACCOUNT_ID}.d.codeartifact.${AWS_REGION}.amazonaws.com/ruby/$(echo ${CODEARTIFACT_DOMAIN})-gems/" && \
+      bundle config mirror.https://rubygems.org "https://aws:${CODEARTIFACT_TOKEN}@${GEM_ENDPOINT#https://}"; \
+    fi \
+  && bundle install --jobs 4 --retry 3
+
+# package.json を先にコピー
+COPY package.json package-lock.json* ./
+
+RUN if [ -n "${CODEARTIFACT_TOKEN}" ] && [ -n "${CODEARTIFACT_DOMAIN}" ]; then \
+      NPM_ENDPOINT="https://${CODEARTIFACT_DOMAIN}-${AWS_ACCOUNT_ID}.d.codeartifact.${AWS_REGION}.amazonaws.com/npm/$(echo ${CODEARTIFACT_DOMAIN})-npm/" && \
+      npm config set registry "${NPM_ENDPOINT}" && \
+      npm config set "//${NPM_ENDPOINT#https://}:_authToken" "${CODEARTIFACT_TOKEN}"; \
+    fi \
+  && npm ci --omit=dev
+
+# アプリソースコードをコピー
+COPY . .
+
+# Assets precompile
+RUN SECRET_KEY_BASE_DUMMY=1 \
+    DATABASE_URL=postgresql://dummy:dummy@localhost/dummy \
+    bundle exec rails assets:precompile \
+  && rm -rf tmp/cache
+
+# ---- 本番実行ステージ ----
+FROM almalinux:9 AS production
+
+ARG RAILS_ENV=production
+
+ENV RAILS_ENV=${RAILS_ENV} \
+    RAILS_LOG_TO_STDOUT=1 \
+    RAILS_SERVE_STATIC_FILES=true \
+    BUNDLE_DEPLOYMENT=1 \
+    BUNDLE_WITHOUT="development test" \
+    BUNDLE_PATH=/usr/local/bundle \
+    PORT=3000 \
+    LANG=ja_JP.UTF-8 \
+    LC_ALL=ja_JP.UTF-8 \
+    TZ=Asia/Tokyo \
+    # Puma設定
+    WEB_CONCURRENCY=2 \
+    RAILS_MAX_THREADS=5
+
+# 実行時依存のみインストール (最小限)
+RUN dnf update -y && dnf install -y \
+    ruby \
+    libpq \
+    ImageMagick \
+    nodejs \
+    curl \
+    glibc-langpack-ja \
+    # AWS SSM Agent不要(EKS上はIRSA使用)
+    # セキュリティツール
+    audit \
+  && dnf clean all \
+  && localedef -f UTF-8 -i ja_JP ja_JP.UTF-8
+
+# 非rootユーザで実行
+RUN groupadd -g 1000 rails && useradd -u 1000 -g rails -m -s /bin/bash rails
+
+WORKDIR /app
+
+# ビルドステージから必要なファイルのみコピー
+COPY --from=builder --chown=rails:rails /usr/local/bundle /usr/local/bundle
+COPY --from=builder --chown=rails:rails /app /app
+
+# 一時ディレクトリ作成
+RUN mkdir -p tmp/pids tmp/cache log \
+  && chown -R rails:rails tmp log
+
+USER rails
+
+# ヘルスチェック
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD curl -f http://localhost:${PORT}/health || exit 1
+
+EXPOSE ${PORT}
+
+# エントリーポイント: DB migration → Puma 起動
+COPY --chown=rails:rails docker-entrypoint-rails.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint-rails.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint-rails.sh"]
+CMD ["bundle", "exec", "puma", "-C", "config/puma.rb"]

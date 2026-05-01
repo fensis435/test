@@ -1,0 +1,164 @@
+{{/*
+rails-app/templates/deployment.yaml
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rails-app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-app.labels" . | nindent 4 }}
+  annotations:
+    # ArgoCD が image tag の変更を検出してロールアウト
+    reloader.stakater.com/auto: "true"
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "rails-app.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "rails-app.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Secret変更時にPodを再起動
+        checksum/secret: {{ include (print $.Template.BasePath "/externalsecret.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 60
+      {{- if .Values.migrations.runAsInit }}
+      initContainers:
+        - name: db-migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["bundle", "exec", "rails", "db:migrate"]
+          env:
+            {{- include "rails-app.commonEnv" . | nindent 12 }}
+          envFrom:
+            - secretRef:
+                name: rds-credentials
+            - secretRef:
+                name: rails-master-key
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      {{- end }}
+      containers:
+        - name: rails
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          env:
+            {{- include "rails-app.commonEnv" . | nindent 12 }}
+          envFrom:
+            - secretRef:
+                name: rds-credentials
+            - secretRef:
+                name: rails-master-key
+            - secretRef:
+                name: cognito-client-secret
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.persistence.enabled }}
+            - name: app-storage
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- end }}
+            - name: tmp
+              mountPath: /app/tmp
+            - name: log
+              mountPath: /app/log
+      volumes:
+        {{- if .Values.persistence.enabled }}
+        - name: app-storage
+          persistentVolumeClaim:
+            claimName: {{ include "rails-app.fullname" . }}-storage
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+        - name: log
+          emptyDir: {}
+---
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rails-app.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-app.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "rails-app.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "rails-app.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: {{ toJson .Values.worker.command }}
+          env:
+            {{- include "rails-app.commonEnv" . | nindent 12 }}
+          envFrom:
+            - secretRef:
+                name: rds-credentials
+            - secretRef:
+                name: rails-master-key
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+{{- end }}

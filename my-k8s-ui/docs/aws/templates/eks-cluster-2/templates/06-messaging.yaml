@@ -1,0 +1,404 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cognito User Pool / SQS ユーザイベントキュー / EventBridge / CloudWatch"
+
+Parameters:
+  ClusterName:
+    Type: String
+  CognitoDomainPrefix:
+    Type: String
+  KmsSqsKeyArn:
+    Type: String
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Cognito User Pool
+  # ---------------------------------------------------------------------------
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    Properties:
+      UserPoolName: !Sub "${ClusterName}-users"
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      MfaConfiguration: "OPTIONAL"
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 7
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: role
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: tenant_id
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailMessage: |
+            あなたのアカウントが作成されました。
+            ユーザー名: {username}
+            仮パスワード: {####}
+          EmailSubject: "アカウント作成のお知らせ"
+      UserPoolAddOns:
+        AdvancedSecurityMode: ENFORCED
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      LambdaConfig:
+        PostConfirmation: !GetAtt CognitoPostConfirmationLambda.Arn
+      Tags:
+        Name: !Sub "${ClusterName}-cognito"
+
+  # Cognito Domain
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref CognitoDomainPrefix
+      UserPoolId: !Ref CognitoUserPool
+
+  # Cognito User Pool Client (Rails アプリ用)
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${ClusterName}-rails-client"
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: true
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      AllowedOAuthFlowsUserPoolClient: true
+      CallbackURLs:
+        - !Sub "https://${ClusterName}-app.internal/auth/cognito/callback"
+      LogoutURLs:
+        - !Sub "https://${ClusterName}-app.internal/auth/signout"
+      SupportedIdentityProviders:
+        - COGNITO
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      PreventUserExistenceErrors: ENABLED
+
+  # Cognito Resource Server (API スコープ定義)
+  CognitoResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      Identifier: !Sub "https://${ClusterName}-api.internal"
+      Name: !Sub "${ClusterName}-api"
+      UserPoolId: !Ref CognitoUserPool
+      Scopes:
+        - ScopeName: "read"
+          ScopeDescription: "Read access"
+        - ScopeName: "write"
+          ScopeDescription: "Write access"
+        - ScopeName: "admin"
+          ScopeDescription: "Admin access"
+
+  # Cognito User Groups
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: "Admins"
+      Description: "Administrator users"
+      UserPoolId: !Ref CognitoUserPool
+      Precedence: 1
+
+  UserGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: "Users"
+      Description: "Regular users"
+      UserPoolId: !Ref CognitoUserPool
+      Precedence: 10
+
+  # ---------------------------------------------------------------------------
+  # Cognito Post-Confirmation Lambda (ユーザ確認後にイベント送信)
+  # ---------------------------------------------------------------------------
+  CognitoLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-cognito-lambda"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SqsPublish
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt UserEventsQueue.Arn
+              - Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                Resource: !Ref KmsSqsKeyArn
+
+  CognitoPostConfirmationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ClusterName}-cognito-post-confirm"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt CognitoLambdaRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          QUEUE_URL: !Sub "https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/${ClusterName}-user-events"
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import boto3
+
+          sqs = boto3.client('sqs')
+          QUEUE_URL = os.environ['QUEUE_URL']
+
+          def handler(event, context):
+              user_attrs = {a['Name']: a['Value'] 
+                            for a in event['request'].get('userAttributes', [])}
+              message = {
+                  'event_type': 'USER_CONFIRMED',
+                  'user_pool_id': event['userPoolId'],
+                  'username': event['userName'],
+                  'email': user_attrs.get('email', ''),
+                  'sub': user_attrs.get('sub', ''),
+                  'trigger': event['triggerSource'],
+              }
+              sqs.send_message(
+                  QueueUrl=QUEUE_URL,
+                  MessageBody=json.dumps(message),
+                  MessageGroupId='user-events',
+              )
+              return event
+
+  CognitoLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CognitoPostConfirmationLambda
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt CognitoUserPool.Arn
+
+  # ---------------------------------------------------------------------------
+  # SQS: ユーザイベントキュー (FIFO)
+  # ---------------------------------------------------------------------------
+  UserEventsQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ClusterName}-user-events-dlq.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: !Ref KmsSqsKeyArn
+
+  UserEventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ClusterName}-user-events.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 120
+      MessageRetentionPeriod: 86400  # 1 day
+      KmsMasterKeyId: !Ref KmsSqsKeyArn
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt UserEventsQueueDLQ.Arn
+        maxReceiveCount: 3
+
+  # Karpenter 中断通知キュー (SQS)
+  KarpenterInterruptionQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ClusterName}-karpenter"
+      MessageRetentionPeriod: 300
+      SqsManagedSseEnabled: true
+
+  KarpenterInterruptionQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref KarpenterInterruptionQueue]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "EC2InterruptionPolicy"
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+                - sqs.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt KarpenterInterruptionQueue.Arn
+
+  # ---------------------------------------------------------------------------
+  # EventBridge: Cognitoイベント -> SQS
+  # ---------------------------------------------------------------------------
+  # Cognito DeleteUser -> SQS
+  CognitoDeleteUserRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ClusterName}-cognito-delete-user"
+      Description: "Cognito AdminDeleteUser -> Rails app via SQS"
+      EventPattern:
+        source:
+          - "aws.cognito-idp"
+        detail-type:
+          - "AWS API Call via CloudTrail"
+        detail:
+          eventSource:
+            - "cognito-idp.amazonaws.com"
+          eventName:
+            - "AdminDeleteUser"
+            - "AdminDisableUser"
+            - "AdminUpdateUserAttributes"
+      State: ENABLED
+      Targets:
+        - Id: "user-events-queue"
+          Arn: !GetAtt UserEventsQueue.Arn
+          SqsParameters:
+            MessageGroupId: "user-events"
+          InputTransformer:
+            InputPathsMap:
+              eventName: "$.detail.eventName"
+              username: "$.detail.requestParameters.username"
+              userPoolId: "$.detail.requestParameters.userPoolId"
+            InputTemplate: |
+              {
+                "event_type": "<eventName>",
+                "username": "<username>",
+                "user_pool_id": "<userPoolId>",
+                "source": "eventbridge"
+              }
+
+  # Karpenter: EC2 Spot Interruption
+  KarpenterSpotInterruptionRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ClusterName}-karpenter-spot-interrupt"
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Spot Instance Interruption Warning
+      State: ENABLED
+      Targets:
+        - Id: "karpenter-queue"
+          Arn: !GetAtt KarpenterInterruptionQueue.Arn
+
+  KarpenterRebalanceRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ClusterName}-karpenter-rebalance"
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance Rebalance Recommendation
+      State: ENABLED
+      Targets:
+        - Id: "karpenter-queue"
+          Arn: !GetAtt KarpenterInterruptionQueue.Arn
+
+  KarpenterStateChangeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ClusterName}-karpenter-state-change"
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance State-change Notification
+      State: ENABLED
+      Targets:
+        - Id: "karpenter-queue"
+          Arn: !GetAtt KarpenterInterruptionQueue.Arn
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch Log Groups
+  # ---------------------------------------------------------------------------
+  EksApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/eks/${ClusterName}/cluster"
+      RetentionInDays: 30
+
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/eks/${ClusterName}/app"
+      RetentionInDays: 14
+
+  RailsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/eks/${ClusterName}/rails"
+      RetentionInDays: 30
+
+  CodeBuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/codebuild/${ClusterName}"
+      RetentionInDays: 14
+
+Outputs:
+  CognitoUserPoolId:
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub "${ClusterName}-CognitoUserPoolId"
+  CognitoUserPoolArn:
+    Value: !GetAtt CognitoUserPool.Arn
+    Export:
+      Name: !Sub "${ClusterName}-CognitoUserPoolArn"
+  CognitoClientId:
+    Value: !Ref CognitoUserPoolClient
+    Export:
+      Name: !Sub "${ClusterName}-CognitoClientId"
+  CognitoIssuer:
+    Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}"
+    Export:
+      Name: !Sub "${ClusterName}-CognitoIssuer"
+  UserEventsQueueUrl:
+    Value: !Ref UserEventsQueue
+    Export:
+      Name: !Sub "${ClusterName}-UserEventsQueueUrl"
+  UserEventsQueueArn:
+    Value: !GetAtt UserEventsQueue.Arn
+    Export:
+      Name: !Sub "${ClusterName}-UserEventsQueueArn"
+  KarpenterInterruptionQueueName:
+    Value: !GetAtt KarpenterInterruptionQueue.QueueName
+    Export:
+      Name: !Sub "${ClusterName}-KarpenterQueueName"

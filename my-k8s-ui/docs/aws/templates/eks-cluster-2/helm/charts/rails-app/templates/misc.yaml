@@ -1,0 +1,115 @@
+{{/* rails-app/templates/service.yaml */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rails-app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-app.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "rails-app.selectorLabels" . | nindent 4 }}
+---
+{{/* rails-app/templates/ingress.yaml */}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "rails-app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-app.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml .Values.ingress.annotations | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "rails-app.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}
+---
+{{/* rails-app/templates/externalsecret.yaml */}}
+{{- if .Values.externalSecrets.enabled }}
+{{- range .Values.externalSecrets.secrets }}
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: {{ .name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "rails-app.labels" $ | nindent 4 }}
+spec:
+  refreshInterval: {{ $.Values.externalSecrets.refreshInterval }}
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: ClusterSecretStore
+  target:
+    name: {{ .name }}
+    creationPolicy: Owner
+  data:
+    {{- toYaml .data | nindent 4 }}
+---
+{{- end }}
+{{- end }}
+---
+{{/* rails-app/templates/pvc.yaml */}}
+{{- if .Values.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "rails-app.fullname" . }}-storage
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-app.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.accessMode }}
+  storageClassName: {{ .Values.persistence.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}
+---
+{{/* rails-app/templates/pdb.yaml */}}
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "rails-app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rails-app.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "rails-app.selectorLabels" . | nindent 6 }}
+{{- end }}
