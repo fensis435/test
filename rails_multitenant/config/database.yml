@@ -1,0 +1,39 @@
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS", 5) %>
+  timeout: 5000
+  connect_timeout: 5
+  checkout_timeout: 5
+  variables:
+    statement_timeout: 10000
+    lock_timeout: 5000
+    idle_in_transaction_session_timeout: 10000
+
+development:
+  <<: *default
+  database: multitenant_development
+  host: <%= ENV.fetch("DATABASE_HOST", "localhost") %>
+  port: <%= ENV.fetch("DATABASE_PORT", 5432) %>
+  username: <%= ENV.fetch("DATABASE_USER", "postgres") %>
+  password: <%= ENV.fetch("DATABASE_PASSWORD", "password") %>
+
+test:
+  <<: *default
+  database: multitenant_test
+  host: <%= ENV.fetch("DATABASE_HOST", "localhost") %>
+  port: <%= ENV.fetch("DATABASE_PORT", 5432) %>
+  username: <%= ENV.fetch("DATABASE_USER", "postgres") %>
+  password: <%= ENV.fetch("DATABASE_PASSWORD", "password") %>
+
+production:
+  <<: *default
+  database: multitenant_production
+  host: <%= ENV["DATABASE_HOST"] %>
+  port: <%= ENV.fetch("DATABASE_PORT", 5432) %>
+  username: <%= ENV["DATABASE_USER"] %>
+  password: <%= ENV["DATABASE_PASSWORD"] %>
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS", 10) %>
+  prepared_statements: false
+  advisory_locks: false
+  sslmode: <%= ENV.fetch("DATABASE_SSL_MODE", "require") %>

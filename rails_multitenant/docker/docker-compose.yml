@@ -1,0 +1,81 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: multitenant_development
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      RAILS_ENV: development
+      DATABASE_HOST: postgres
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: password
+      REDIS_URL: redis://redis:6379/1
+      PLATFORM: aws
+      RDS_HOST: postgres
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID}
+      AWS_REGION: ${AWS_REGION:-ap-northeast-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - bundle_cache:/usr/local/bundle
+
+  sidekiq:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: bundle exec sidekiq -C config/sidekiq.yml
+    environment:
+      RAILS_ENV: development
+      DATABASE_HOST: postgres
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: password
+      REDIS_URL: redis://redis:6379/1
+      PLATFORM: aws
+      RDS_HOST: postgres
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID}
+      AWS_REGION: ${AWS_REGION:-ap-northeast-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - bundle_cache:/usr/local/bundle
+
+volumes:
+  postgres_data:
+  bundle_cache:
