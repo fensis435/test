@@ -37,8 +37,9 @@ RUN microdnf install -y --setopt=install_weak_deps=0 \
         openssl-libs readline zlib libyaml libffi \
         bzip2-libs ncurses-libs sqlite-libs xz-libs \
         ca-certificates tzdata shadow-utils \
-        which iputils procps-ng net-tools wget \
-        tar gzip unzip vim-enhanced findutils psmisc \
+        which iputils procps-ng net-tools wget procps-ng \
+        tar bzip2 gzip unzip zip minimal-vim less findutils diffutils psmisc \
+        gawk grep sed hostname \
     && microdnf clean all
 
 COPY --from=deps /opt/ruby /opt/ruby
