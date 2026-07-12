@@ -1,0 +1,32 @@
+# Dockerfile.build-base
+FROM almalinux:9 AS build-base
+
+ARG RUBY_VERSION=3.3.5
+ARG PYTHON_VERSION=3.12.4
+
+RUN dnf install -y epel-release \
+    && dnf config-manager --set-enabled crb \
+    && dnf clean all
+
+RUN dnf install -y --setopt=install_weak_deps=0 \
+        gcc gcc-c++ make git patch pkgconfig \
+        openssl-devel readline-devel zlib-devel \
+        libyaml-devel libffi-devel bzip2-devel \
+        ncurses-devel sqlite-devel xz-devel \
+        gdbm-devel \
+    && dnf clean all
+
+ENV RBENV_ROOT=/opt/rbenv
+RUN git clone https://github.com/rbenv/rbenv.git ${RBENV_ROOT} \
+    && git clone https://github.com/rbenv/ruby-build.git ${RBENV_ROOT}/plugins/ruby-build
+RUN ${RBENV_ROOT}/plugins/ruby-build/bin/ruby-build ${RUBY_VERSION} /opt/ruby
+
+ENV PYENV_ROOT=/opt/pyenv
+RUN git clone https://github.com/pyenv/pyenv.git ${PYENV_ROOT}
+RUN ${PYENV_ROOT}/plugins/python-build/bin/python-build ${PYTHON_VERSION} /opt/python
+
+ENV PATH="/opt/ruby/bin:/opt/python/bin:${PATH}"
+
+# bundlerも同梱しておくと各アプリ側でのバージョン差異を減らせる
+RUN gem install bundler --no-document
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel

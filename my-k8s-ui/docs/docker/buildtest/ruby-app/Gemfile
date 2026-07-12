@@ -1,0 +1,9 @@
+source "https://rubygems.org"
+
+ruby "3.3.5"
+
+gem "sinatra", "~> 4.1"
+gem "puma", "~> 6.4"      # C拡張を含む(ビルド時にgccが必要)
+gem "sqlite3", "~> 2.1"   # ネイティブ拡張gemの代表格
+gem "rackup", "~> 2.1"
+gem "json"

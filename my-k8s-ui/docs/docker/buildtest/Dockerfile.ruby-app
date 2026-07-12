@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1
+
+########################################
+# Stage 1: build (rbenv/ruby-buildでRuby本体を構築)
+########################################
+# Separated into Dockerfile.build-base
+
+########################################
+# Stage 2: deps (bundle installはbuildステージ上で実行)
+########################################
+FROM build-base:ruby3.3.5-python3.12.4 AS deps
+
+WORKDIR /app
+COPY ruby-app/Gemfile ./Gemfile
+
+# ネイティブ拡張(sqlite3, puma等)のコンパイルもここで完結させる
+RUN bundle config set --local path 'vendor/bundle' \
+    && bundle config set --local without 'development test' \
+    && bundle lock \
+    && bundle install --jobs=4
+
+COPY ruby-app/ .
+
+RUN mkdir -p /tmp/deps && \
+    { \
+      find /opt/ruby /app/vendor/bundle -type f \( -name "*.so*" -o -perm -u+x \) 2>/dev/null ; \
+    } | sort -u | xargs -I{} sh -c 'ldd "{}" 2>/dev/null' \
+      | awk '/=>/{print $3} !/=>/{print $1}' \
+      | grep '^/' | sort -u > /tmp/deps/shared_libs.txt || true
+
+########################################
+# Stage 3: runtime (最小イメージ + 実行に必要なものだけコピー)
+########################################
+FROM almalinux:9-minimal AS runtime
+
+RUN microdnf install -y --setopt=install_weak_deps=0 \
+        openssl-libs readline zlib libyaml libffi \
+        bzip2-libs ncurses-libs sqlite-libs xz-libs \
+        ca-certificates tzdata shadow-utils \
+        which iputils procps-ng net-tools wget \
+        tar gzip unzip vim-enhanced findutils psmisc \
+    && microdnf clean all
+
+COPY --from=deps /opt/ruby /opt/ruby
+COPY --from=deps /app /app
+
+RUN echo "/opt/ruby/lib" > /etc/ld.so.conf.d/ruby.conf \
+    && ldconfig
+
+ENV PATH="/opt/ruby/bin:${PATH}"
+ENV BUNDLE_PATH="/app/vendor/bundle"
+ENV BUNDLE_GEMFILE="/app/Gemfile"
+
+RUN groupadd -g 10001 appgroup \
+    && useradd -u 10001 -g appgroup -s /sbin/nologin -M appuser \
+    && chown -R appuser:appgroup /app /tmp
+USER appuser
+WORKDIR /app
+
+EXPOSE 4567
+
+CMD ["bundle", "exec", "puma", "-p", "4567", "config.ru"]
