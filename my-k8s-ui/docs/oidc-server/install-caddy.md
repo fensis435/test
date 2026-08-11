@@ -53,6 +53,8 @@ sudo systemctl status caddy.service
 192.168.1.50  idp.dev.test app.dev.test api.dev.test
 ```
 
+If you are using dnsmasq on the bastion server, you can register the aforementioned local DNS in its configuration.
+
 ### extract the root CA certificate(executed on the host side)
 ```bash
 mkcert -CAROOT
