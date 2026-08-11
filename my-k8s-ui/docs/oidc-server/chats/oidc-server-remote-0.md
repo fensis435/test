@@ -13,7 +13,7 @@ VITE_RAILS_API_BASE_URL=https://api.dev.test
 
 ## open-web-test/frontendのvite.config.tsを編集
 ```bash
-vaio@ubuntu2404:~/oidc-server/oidc-web-test/frontend$ cat vite.config.ts
+~/oidc-server/oidc-web-test/frontend$ cat vite.config.js
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -29,8 +29,8 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
+    allowedHosts: true,
   },
-  allowedHosts: true,
 });
 
 ```
