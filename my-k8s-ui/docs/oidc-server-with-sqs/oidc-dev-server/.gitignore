@@ -1,0 +1,23 @@
+node_modules/
+dist/
+
+# 環境変数(秘密情報を含む)
+.env
+.env.local
+
+# SQLiteデータベースファイル
+*.db
+*.db-journal
+prisma/dev.db
+prisma/dev.db-journal
+
+# JWKS秘密鍵
+secrets/
+*.jwks.json
+
+# テスト実行時の一時ファイル
+coverage/
+
+# OS/エディタ
+.DS_Store
+*.log

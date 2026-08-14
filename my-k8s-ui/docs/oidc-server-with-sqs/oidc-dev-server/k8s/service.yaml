@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: oidc-dev-server
+  namespace: default
+  labels:
+    app: oidc-dev-server
+    app.kubernetes.io/name: oidc-dev-server
+    app.kubernetes.io/component: idp
+spec:
+  selector:
+    app: oidc-dev-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  type: ClusterIP

@@ -1,0 +1,88 @@
+# ------------------------------------------------------------------------------
+# Ingress
+#
+# 重要な設計判断: このIngressは OIDC Core のパスのみを公開する。
+# /api/v1/* (Management API) は意図的にルーティングしない。
+# Management APIはRailsからのみ、ClusterIP Service(oidc-dev-server)経由の
+# クラスタ内部通信として利用される想定であり、外部に公開しない
+# (最優先要件の「Reactは標準OIDCエンドポイントのみ利用」を
+#  インフラ層でも強制する設計)。
+# ------------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oidc-dev-server
+  namespace: default
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # OIDCフローはブラウザからの直接アクセスのため、過度なバッファリングを避ける
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # 総当たり攻撃対策の簡易レート制限(必要に応じて調整)
+    nginx.ingress.kubernetes.io/limit-rps: "20"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - oidc-dev.internal.example.com
+      secretName: oidc-dev-server-tls
+  rules:
+    - host: oidc-dev.internal.example.com
+      http:
+        paths:
+          - path: /.well-known
+            pathType: Prefix
+            backend:
+              service:
+                name: oidc-dev-server
+                port:
+                  number: 80
+          - path: /authorize
+            pathType: Prefix
+            backend:
+              service:
+                name: oidc-dev-server
+                port:
+                  number: 80
+          - path: /token
+            pathType: Exact
+            backend:
+              service:
+                name: oidc-dev-server
+                port:
+                  number: 80
+          - path: /userinfo
+            pathType: Exact
+            backend:
+              service:
+                name: oidc-dev-server
+                port:
+                  number: 80
+          - path: /jwks.json
+            pathType: Exact
+            backend:
+              service:
+                name: oidc-dev-server
+                port:
+                  number: 80
+          - path: /logout
+            pathType: Prefix
+            backend:
+              service:
+                name: oidc-dev-server
+                port:
+                  number: 80
+          - path: /revoke
+            pathType: Exact
+            backend:
+              service:
+                name: oidc-dev-server
+                port:
+                  number: 80
+          - path: /interaction
+            pathType: Prefix
+            backend:
+              service:
+                name: oidc-dev-server
+                port:
+                  number: 80

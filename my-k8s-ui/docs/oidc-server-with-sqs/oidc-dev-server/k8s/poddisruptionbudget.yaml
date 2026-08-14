@@ -1,0 +1,25 @@
+# ------------------------------------------------------------------------------
+# PodDisruptionBudget
+#
+# replicas: 1 の構成のため、minAvailable: 1 は「自発的な破壊的操作
+# (ノードドレイン、クラスタオートスケーラーのスケールイン等)を
+# 完全にブロックする」ことを意味する。
+#
+# これは意図的な設計判断である: SQLiteベースの単一レプリカ構成では
+# Podの入れ替え中は必然的にダウンタイムが発生するため、
+# 「いつダウンタイムが起きるか」を運用者が明示的にコントロールできるように
+# (kubectl drain --disable-eviction等の明示操作を要求する形で)保護する。
+#
+# 可用性要件が上がりデータストアをSQLite以外(PostgreSQL等)に切り替えて
+# 複数レプリカ運用に移行する場合は、maxUnavailable: 1 等に変更すること。
+# ------------------------------------------------------------------------------
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: oidc-dev-server
+  namespace: default
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: oidc-dev-server

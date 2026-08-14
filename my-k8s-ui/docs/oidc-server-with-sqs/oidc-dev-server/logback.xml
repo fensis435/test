@@ -1,0 +1,17 @@
+<configuration>
+    <!-- 標準出力（コンソール）用のアペンダー -->
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- デフォルトは INFO -->
+    <root level="INFO">
+        <appender-ref ref="STDOUT" />
+    </root>
+
+    <!-- ElasticMQ の SQS リクエストログを DEBUG レベルにする -->
+    <logger name="org.elasticmq.rest.sqs" level="DEBUG" />
+    <logger name="org.elasticmq.actor" level="DEBUG" />
+</configuration>

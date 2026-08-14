@@ -1,0 +1,27 @@
+# ----------------------------------------------------------------------------
+# サンプル: Rails Pod (Viteビルド済みアセットを配信) の Helm values.yaml 抜粋
+#
+# entrypointが docker/generate-config.sh を実行してから
+# 本来のRailsサーバー起動コマンドに処理を渡す構成を想定。
+# (実際のDeployment/entrypoint実装はRailsアプリ側のリポジトリで行う)
+# ----------------------------------------------------------------------------
+
+env:
+  # 環境ごとにHelmの -f values-<env>.yaml / --set で切り替える値
+  OIDC_ISSUER: "https://idp.dev.test"
+  OIDC_CLIENT_ID: "react-web-test-client"
+  OIDC_REDIRECT_URI: "https://app.dev.test/callback"
+  OIDC_POST_LOGOUT_REDIRECT_URI: "https://app.dev.test/"
+  OIDC_SCOPES: "openid email profile groups offline_access"
+  RAILS_API_BASE_URL: "https://api.dev.test"
+
+# 本番向け values-production.yaml では、例えば以下のように
+# Cognito Hosted UIのURLへ切り替えるだけでよい
+# (PRODUCTION_PARITY.md の差異一覧と対応):
+#
+# env:
+#   OIDC_ISSUER: "https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_xxxxxxx"
+#   OIDC_CLIENT_ID: "xxxxxxxxxxxxxxxxxxxxxxxxxx"
+#   OIDC_REDIRECT_URI: "https://app.example.com/callback"
+#   OIDC_POST_LOGOUT_REDIRECT_URI: "https://app.example.com/"
+#   RAILS_API_BASE_URL: "https://api.example.com"

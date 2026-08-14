@@ -1,0 +1,43 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+ruby "3.4.5"
+
+# ----------------------------------------------------------------------------
+# [設計方針の更新]
+# 当初このアプリはAccess Tokenの検証(Resource Server役)以外の責務を
+# 持たない前提で、ActiveRecordを意図的に除外していた。
+#
+# 新要件(Cognitoユーザー情報とバックエンドのユーザーDBを同期する)により、
+# このアプリ自体が「仮のユーザーDB」を持つことになったため、ここで
+# ActiveRecordを再度有効化する。ただし責務は「User CRUD操作の"入り口"
+# (REST/SQS)ごとの差異をAdapter層に閉じ込め、コアロジック
+# (UserSyncApplicationService)とDBスキーマ自体は入り口に依存しない」
+# というPorts and Adapters(ヘキサゴナルアーキテクチャ)の枠を維持する。
+# ----------------------------------------------------------------------------
+
+gem "rails", "~> 8.0"
+gem "puma", "~> 6.4"
+gem "sqlite3", "~> 2.1"
+
+# JWT検証(JWKS経由でのRS256署名検証)
+gem "jwt", "~> 2.9"
+
+# React(Vite dev server)からのクロスオリジンリクエストを許可するため
+gem "rack-cors", "~> 2.0"
+
+# Cognito -> SQS -> Backend 同期パイプライン用。
+# ElasticMQ(開発)・実AWS SQS(本来はCognito側が担うため通常は使わない
+# 想定だが、将来の拡張のためコードは同一にしておく)の両方に対して
+# 同じSDKで完結させる(「オンプレとAWSのコードを同じにしたい」という
+# 最優先要件をRuby側でも実現するための選定)。
+gem "aws-sdk-sqs", "~> 1.86"
+
+group :development, :test do
+  gem "dotenv-rails", "~> 3.1"
+end
+
+group :development do
+  gem "listen", "~> 3.9"
+end

@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oidc-dev-server-config
+  namespace: default
+  labels:
+    app: oidc-dev-server
+    app.kubernetes.io/name: oidc-dev-server
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  OIDC_ISSUER: "https://oidc-dev.internal.example.com"
+  # ALB Ingress配下で動作するため常にtrue(ローカル直接httpアクセス時のみfalse)
+  OIDC_TRUST_PROXY: "true"
+  DATABASE_URL: "file:/data/oidc.db"
+  OIDC_JWKS_PATH: "/secrets/jwks/jwks.json"
+  ADMIN_JWT_TTL_SECONDS: "3600"
+  WEBHOOK_MAX_ATTEMPTS: "5"
+  WEBHOOK_RETRY_BASE_DELAY_MS: "2000"

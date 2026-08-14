@@ -1,0 +1,11 @@
+**/.env
+**/node_modules/
+**/dist/
+frontend/dist/
+backend/.bundle/
+backend/vendor/bundle/
+backend/log/
+backend/tmp/
+backend/storage/*.sqlite3
+*.gem
+.DS_Store

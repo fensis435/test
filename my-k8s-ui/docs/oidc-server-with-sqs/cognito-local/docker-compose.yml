@@ -1,0 +1,16 @@
+name: cognito-local
+
+services:  
+  cognito:
+    image: jagregory/cognito-local:latest
+    build:
+      context: ./aws-mock/cognito
+    container_name: cognito
+    ports:
+      - 9229:9229
+    environment:
+      PORT: 9229
+    volumes:
+      - type: bind
+        source: ./aws-mock/cognito
+        target: /app/.cognito

@@ -1,0 +1,156 @@
+name: oidc-dev-server
+
+services:
+  oidc-dev-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: oidc-dev-server:local
+    container_name: oidc-dev-server
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: file:/data/oidc.db
+      OIDC_JWKS_PATH: /secrets/jwks/jwks.json
+    volumes:
+      - oidc-data:/data
+      - oidc-jwks:/secrets/jwks
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/.well-known/openid-configuration').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    networks:
+      - oidc-net
+
+  # JWKS(署名鍵)生成用のワンショットコンテナ。
+  #
+  # [修正の経緯]
+  #   1回目: このサービス自体が存在せず、oidc-dev-serverが要求する
+  #          /secrets/jwks/jwks.json を生成する手段が無かった。
+  #   2回目: サービスは追加したが USER 指定が無く root で実行されるため、
+  #          生成された jwks.json が root 所有・mode 0600 になり、
+  #          非root(appuser, uid 1001)で動く oidc-dev-server サービスが
+  #          読めず EACCES になった。そこで `user: "1001:1001"` を追加した。
+  #   3回目(今回): `user: "1001:1001"` だけでは不十分だった。Dockerは
+  #          イメージ側に対象パスのディレクトリが存在しない場合、空の
+  #          名前付きボリュームのマウントポイントを root 所有・mode 0755で
+  #          新規作成する。target: build イメージには /secrets/jwks が
+  #          そもそも存在しない(mkdirしているのはruntimeステージのみ)ため、
+  #          ボリューム初回マウント時に必ずroot所有ディレクトリになる。
+  #          プロセスをuid 1001にしても、そのディレクトリへの書き込み権限
+  #          (0755の"other"はrwxではなくr-x)が無く、ファイル作成自体が
+  #          EACCESになっていた。
+  #
+  # [最終的な修正方針] initコンテナの定石パターンに変更する:
+  #   root(デフォルト、targetイメージにUSER指定なし)としてファイルを作成し、
+  #   最後に明示的に `chown` で uid 1001 へ所有権を移す。
+  #   rootはディレクトリの所有者が誰であっても書き込み・chownが可能なため、
+  #   この順序であれば権限エラーが起きない。
+  #
+  # 使い方: docker compose --profile jwks run --rm jwks
+  jwks:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: build
+    image: oidc-dev-server:build
+    profiles: ["jwks"]
+    volumes:
+      - oidc-jwks:/secrets/jwks
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        npx tsx scripts/generate-jwks.ts /secrets/jwks/jwks.json &&
+        chown -R 1001:1001 /secrets/jwks
+    networks:
+      - oidc-net
+
+  # マイグレーション実行用のワンショットコンテナ。
+  # [修正] jwksサービスと同じ理由・同じ方針(root実行 + 最後にchown)。
+  # 使い方: docker compose --profile migrate run --rm migrate
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: build
+    image: oidc-dev-server:build
+    profiles: ["migrate"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: file:/data/oidc.db
+    volumes:
+      - oidc-data:/data
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        npx prisma migrate deploy --schema=prisma/schema.prisma &&
+        chown -R 1001:1001 /data
+    networks:
+      - oidc-net
+
+  # シード投入用のワンショットコンテナ。
+  # [修正] jwks/migrateと同じ理由・同じ方針。
+  # 使い方: docker compose --profile seed run --rm seed
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: build
+    image: oidc-dev-server:build
+    profiles: ["seed"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: file:/data/oidc.db
+      SEED_ADMIN_EMAIL: admin@example.com
+      SEED_ADMIN_PASSWORD: change-me-please
+    volumes:
+      - oidc-data:/data
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        npx tsx prisma/seed.ts &&
+        chown -R 1001:1001 /data
+    networks:
+      - oidc-net
+
+  # ----------------------------------------------------------------------------
+  # ElasticMQ(SQS互換API)。
+  #
+  # 本番でCognitoを使う場合、CloudTrail -> EventBridge -> SQS という
+  # パイプライン全体がAWS側で完結するため、oidc-dev-serverもRailsも
+  # このサービス自体を意識しない。開発環境限定の「Cognitoイベント
+  # パイプラインのシミュレーター」という位置づけ。
+  #
+  # 9324番ポートをホストに公開しているため、oidc-dev-server/Rails側が
+  # Dockerコンテナ内・ホストマシン上どちらで動いていても
+  # http://localhost:9324 で到達できる(このプロジェクト全体で
+  # 一貫している「ネイティブ実行とDocker実行を混在できる」設計方針を踏襲)。
+  # ----------------------------------------------------------------------------
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.6.16
+    container_name: oidc-dev-server-elasticmq
+    ports:
+      - "9324:9324" # SQS互換API
+      - "9325:9325" # 管理UI(任意、ブラウザでキューの中身を確認できる)
+    volumes:
+      - ./elasticmq.conf:/opt/elasticmq.conf:ro
+        #- ./logback.xml:/opt/logback.xml:ro
+    networks:
+      - oidc-net
+
+volumes:
+  oidc-data:
+  oidc-jwks:
+
+networks:
+  oidc-net:
+    driver: bridge

@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OIDC End-to-End Verification</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <!--
+      config.js はビルド成果物に含めない。コンテナ起動時にentrypointスクリプト
+      (docker/generate-config.sh)が環境変数から動的生成する。
+      window.__APP_CONFIG__ にランタイム設定を注入する(src/runtime-config.ts参照)。
+      main.tsxより必ず先に読み込む必要がある。
+    -->
+    <script src="/config.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

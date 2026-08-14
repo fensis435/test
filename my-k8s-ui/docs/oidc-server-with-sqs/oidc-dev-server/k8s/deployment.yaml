@@ -1,0 +1,158 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oidc-dev-server
+  namespace: default
+  labels:
+    app: oidc-dev-server
+    app.kubernetes.io/name: oidc-dev-server
+    app.kubernetes.io/component: idp
+    app.kubernetes.io/part-of: eks-multi-tenant-platform
+spec:
+  # ------------------------------------------------------------------------
+  # SQLiteはファイルロックの都合上、複数Pod間の同時書き込みに対応しない。
+  # そのため単一レプリカを設計上の制約として明示する(DB設計レビューで
+  # 指摘済みのリスクへの対応)。スケールが必要になった場合は、
+  # SQLite -> PostgreSQL等への切替が前提となる。
+  # ------------------------------------------------------------------------
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    # ReadWriteOnceのPVCを単一Podが排他利用するため、
+    # RollingUpdateではなくRecreate(旧Pod完全停止後に新Podを起動)を使う。
+    type: Recreate
+  selector:
+    matchLabels:
+      app: oidc-dev-server
+  template:
+    metadata:
+      labels:
+        app: oidc-dev-server
+        app.kubernetes.io/name: oidc-dev-server
+        app.kubernetes.io/component: idp
+    spec:
+      serviceAccountName: oidc-dev-server
+      automountServiceAccountToken: false
+      # プライベートレジストリ利用前提のため明示する(値は運用環境で作成したSecretに置換)
+      imagePullSecrets:
+        - name: oidc-dev-server-registry-credentials
+      # IdPは認証基盤の中核コンポーネントのため、ノードリソース逼迫時に
+      # 他の一般ワークロードより優先して維持されるようPriorityClassを付与する。
+      # クラスタ側で事前に oidc-dev-server-critical PriorityClass の作成が必要。
+      priorityClassName: oidc-dev-server-critical
+
+      # Pod全体のセキュリティコンテキスト(非root強制、fsGroupでボリューム権限調整)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: oidc-dev-server
+          # [修正: レビュー指摘#7] :latest はロールバック時に異なる実体を
+          # 取得しうるため使用禁止。immutableなバージョンタグ(+可能なら
+          # digest)を明示的に指定する。CI/CDのビルド番号やgit shaを
+          # タグに含める運用を推奨(例: v1.2.3, 2026-08-02-abcdef1)。
+          image: your-registry.example.com/oidc-dev-server:1.0.0@sha256:REPLACE_WITH_ACTUAL_DIGEST
+          imagePullPolicy: IfNotPresent
+
+          # コンテナレベルのセキュリティコンテキスト(最小権限)
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: oidc-dev-server-config
+            - secretRef:
+                name: oidc-dev-server-secret
+
+          # [修正: レビュー指摘#14] readOnlyRootFilesystem: true との両立確認。
+          # Node.js/npmおよびPrisma Query Engineはデフォルトで $HOME 配下
+          # (npmキャッシュ等)に書き込もうとすることがあるため、書き込み可能な
+          # /tmp を明示的に HOME として指定する。Prismaのクエリエンジン自体は
+          # 実行時ファイル書き込みを行わない(SQLiteファイルは/dataへの書き込み
+          # であり、これは別途PVCとしてマウント済み)ため、readOnlyRootFilesystem
+          # は理論上両立できるが、デプロイ後は起動ログでEACCES等が出ないことを
+          # 必ず実機検証すること。
+          env:
+            - name: HOME
+              value: /tmp
+            - name: NPM_CONFIG_CACHE
+              value: /tmp/.npm
+
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: jwks
+              mountPath: /secrets/jwks
+              readOnly: true
+            # readOnlyRootFilesystem: true のため、Node.js/npmの一時ファイル
+            # 書き込み先としてtmpfsを明示的にマウントする
+            - name: tmp
+              mountPath: /tmp
+
+          # --------------------------------------------------------------
+          # Probe設計:
+          #   startupProbe  : 起動完了(Prisma接続・JWKS読み込み)を待つ。
+          #                   これが成功するまでliveness/readinessは無効。
+          #   readinessProbe: Discoveryドキュメントが返せる = トラフィック
+          #                   受け入れ可能と判定。
+          #   livenessProbe : プロセスハングを検知し自動再起動。
+          # --------------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: /.well-known/openid-configuration
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+
+          readinessProbe:
+            httpGet:
+              path: /.well-known/openid-configuration
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /.well-known/openid-configuration
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: oidc-dev-server-data
+        - name: jwks
+          persistentVolumeClaim:
+            claimName: oidc-dev-server-jwks
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+
+      terminationGracePeriodSeconds: 30

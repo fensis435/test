@@ -1,0 +1,93 @@
+# ------------------------------------------------------------------------------
+# NetworkPolicy
+#
+# 前提: CNIがNetworkPolicyをサポートしていること(EKSの場合はCalico、または
+# VPC CNI + Network Policy engine有効化が必要)。
+#
+# Ingress方針:
+#   - Ingress Controller(ingress-nginx namespace)からのHTTP(3000)を許可
+#     -> React(ブラウザ経由)のOIDCフロー(/authorize, /token等)がここを通る
+#   - Railsアプリ(app.kubernetes.io/name=rails-api ラベルを想定)からの
+#     直接アクセスを許可 -> Management API(/api/v1/*)呼び出し用
+#
+# Egress方針:
+#   - DNS解決(kube-dns, UDP/TCP 53)を許可(必須)
+#   - [修正: レビュー指摘#8] 従来はegressがnamespaceSelector: {}(クラスタ内
+#     Podのみ)に限定されており、クラスタ外部のWebhook宛先(例: 外部SaaS、
+#     オンプレミス連携等)への疎通が実質ブロックされていた。
+#     Webhook機能は「内部/外部いずれのURLも登録可能」という設計のため、
+#     クラスタ内部向けegressに加えて、プライベートIPレンジを除外した
+#     インターネット向けegress(ipBlock)を許可する。
+#     これによりSSRF対策(shared/url-safety.tsによるプライベートIP拒否)
+#     とネットワークポリシーの両輪で、意図した宛先(パブリックインターネット
+#     またはクラスタ内部)にのみ到達可能な状態を維持する。
+# ------------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: oidc-dev-server
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: oidc-dev-server
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 3000
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: rails-api
+      ports:
+        - protocol: TCP
+          port: 3000
+
+  egress:
+    # DNS解決
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # クラスタ内部(Rails API等)へのWebhook配信・その他内部通信
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+
+    # クラスタ外部(パブリックインターネット)向けWebhook配信。
+    # RFC1918プライベートレンジおよびリンクローカル(メタデータエンドポイント
+    # 含む)を明示的に除外し、内部ネットワークへの疎通はここでは許可しない
+    # (内部宛先は上記の namespaceSelector ルールで別途カバーされる)。
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80

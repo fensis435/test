@@ -1,0 +1,356 @@
+// ============================================================================
+// Prisma Schema - Development OIDC Server
+// 前回のDB設計(ER図/PK/FK/Index/制約/論理削除/監査項目)をそのまま反映する。
+// 仕様変更は行わない。oidc-provider内部が要求する追加モデル(Interaction等)
+// のみ、業務8テーブルとは別に OidcGenericStore として追加している。
+//
+// [修正: SQLiteはネイティブenumをサポートしないため(Prismaコネクタ制約)、
+// 本来enumで表現すべきフィールドはすべて String 型とし、許容値は
+// TypeScript側のリテラル型 + zodスキーマで強制する方針に変更する。
+// 許容値の一覧は src/shared/enums.ts を正とする(Single Source of Truth)。
+// PostgreSQL等enum対応コネクタへ移行する際は、このコメントを起点に
+// String -> enum への型変更を検討すること。]
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
+
+model User {
+  id               String   @id @default(uuid())
+  email            String
+  normalizedEmail  String   @unique
+  emailVerified    Boolean  @default(false)
+  passwordHash     String
+  givenName        String?
+  familyName       String?
+  // 許容値: "ACTIVE" | "DISABLED" (src/shared/enums.ts の UserStatus を参照)
+  status           String   @default("ACTIVE")
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  deletedAt        DateTime?
+
+  // 許容値: "SYSTEM" | "ADMIN_USER" | "API_CLIENT" (src/shared/enums.ts の ActorType を参照)
+  createdByType    String?
+  createdById      String?
+  updatedByType    String?
+  updatedById      String?
+
+  userGroups       UserGroup[]
+  sessions         Session[]
+  refreshTokens    RefreshToken[]
+  authorizationCodes AuthorizationCode[]
+  passwordResetTokens PasswordResetToken[]
+
+  @@index([status])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Groups
+// ---------------------------------------------------------------------------
+
+model Group {
+  id            String   @id @default(uuid())
+  name          String   @unique
+  description   String?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  deletedAt     DateTime?
+
+  createdByType String?
+  createdById   String?
+  updatedByType String?
+  updatedById   String?
+
+  userGroups    UserGroup[]
+
+  @@index([deletedAt])
+  @@map("groups")
+}
+
+// ---------------------------------------------------------------------------
+// UserGroups (中間テーブル)
+// ---------------------------------------------------------------------------
+
+model UserGroup {
+  id             String   @id @default(uuid())
+  userId         String
+  groupId        String
+  assignedAt     DateTime @default(now())
+  assignedByType String?
+  assignedById   String?
+
+  user           User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  group          Group    @relation(fields: [groupId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, groupId])
+  @@index([userId])
+  @@index([groupId])
+  @@map("user_groups")
+}
+
+// ---------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------
+
+model Session {
+  id                String   @id @default(uuid())
+  userId            String
+  sessionTokenHash  String   @unique
+  userAgent         String?
+  ipAddress         String?
+  issuedAt          DateTime @default(now())
+  expiresAt         DateTime
+  lastActivityAt    DateTime @default(now())
+  revokedAt         DateTime?
+
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokens     RefreshToken[]
+
+  @@index([userId, expiresAt])
+  @@index([revokedAt])
+  @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Clients (OIDC RP登録 / Cognito App Client相当)
+// ---------------------------------------------------------------------------
+
+model Client {
+  id                       String   @id @default(uuid())
+  clientId                 String   @unique
+  clientSecretHash         String?
+  isPublic                 Boolean
+  // 許容値: "NONE" | "CLIENT_SECRET_BASIC" | "CLIENT_SECRET_POST"
+  // (src/shared/enums.ts の TokenEndpointAuthMethod を参照)
+  tokenEndpointAuthMethod  String
+  redirectUris             String   // JSON配列文字列
+  postLogoutRedirectUris   String   @default("[]")
+  allowedScopes            String   // JSON配列文字列
+  grantTypes               String   // JSON配列文字列
+
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+  deletedAt                DateTime?
+
+  refreshTokens            RefreshToken[]
+  authorizationCodes       AuthorizationCode[]
+
+  @@index([deletedAt])
+  @@map("clients")
+}
+
+// ---------------------------------------------------------------------------
+// RefreshTokens
+// ---------------------------------------------------------------------------
+
+model RefreshToken {
+  id                 String   @id @default(uuid())
+  tokenHash          String   @unique
+  familyId           String
+  userId             String
+  clientId           String
+  sessionId          String?
+  replacedByTokenId  String?  @unique
+  scope              String
+  // Resource Indicators(RFC 8707)のリソース識別子。
+  // AuthorizationCodeと同じ理由で必要(Refresh Token Grantでも
+  // JWT形式のAccess Tokenを再発行できるようにするため)。
+  resource           String?
+  issuedAt           DateTime @default(now())
+  expiresAt          DateTime
+  revokedAt          DateTime?
+  revokedReason      String?
+
+  user               User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  client             Client   @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  session            Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  replacedBy         RefreshToken? @relation("TokenReplacement", fields: [replacedByTokenId], references: [id], onDelete: SetNull)
+  replacementOf      RefreshToken? @relation("TokenReplacement")
+
+  @@index([userId])
+  @@index([clientId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// AuthorizationCodes
+// ---------------------------------------------------------------------------
+
+model AuthorizationCode {
+  id                    String   @id @default(uuid())
+  codeHash              String   @unique
+  userId                String
+  clientId              String
+  redirectUri           String
+  codeChallenge         String
+  // 許容値: "S256" 固定(src/shared/enums.ts の CodeChallengeMethod を参照)
+  codeChallengeMethod   String   @default("S256")
+  scope                 String
+  nonce                 String?
+  // oidc-providerがGrantを解決するために必須のフィールド。
+  // [修正] 当初のDB設計時に見落としており、adapter.ts側でOidcGenericStoreへの
+  // 副次インデックスとしてのみ保存し、find()で読み返していなかったため、
+  // /token 時の Grant.find(code.grantId) が常に undefined になり
+  // invalid_grant("grant not found")エラーの原因になっていた。
+  grantId               String?
+  // Resource Indicators(RFC 8707)のリソース識別子。
+  // [修正] 当初この保存を見落としており、/token交換時に
+  // resolveResource()が code.resource === undefined と判定してしまい、
+  // useGrantedResource にすら到達せずAccess Tokenがopaqueで
+  // 発行され続けていた(grantId/jtiと同じ「手動payload再構築での
+  // フィールド欠落」パターン)。
+  resource              String?
+  expiresAt             DateTime
+  usedAt                DateTime?
+  createdAt             DateTime @default(now())
+
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client                Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, userId])
+  @@index([expiresAt])
+  @@map("authorization_codes")
+}
+
+// ---------------------------------------------------------------------------
+// WebhookLogs (意図的にFKなし。対象削除後も監査ログとして残す)
+// ---------------------------------------------------------------------------
+
+model WebhookLog {
+  id                    String   @id @default(uuid())
+  eventType             String
+  targetUrl             String
+  payload               String   // JSON文字列
+  // 許容値: "PENDING" | "SUCCESS" | "FAILED" | "RETRYING"
+  // (src/shared/enums.ts の WebhookStatus を参照)
+  status                String   @default("PENDING")
+  httpStatusCode        Int?
+  attemptCount          Int      @default(0)
+  lastAttemptAt         DateTime?
+  nextRetryAt           DateTime?
+  responseBodySnippet   String?
+  createdAt             DateTime @default(now())
+
+  @@index([status, nextRetryAt])
+  @@index([eventType, createdAt])
+  @@map("webhook_logs")
+}
+
+// ---------------------------------------------------------------------------
+// WebhookSubscriptions (Webhook登録定義。WebhookLogsとは別概念)
+// ---------------------------------------------------------------------------
+
+model WebhookSubscription {
+  id           String   @id @default(uuid())
+  targetUrl    String
+  eventTypes   String   // JSON配列文字列
+  secret       String
+  active       Boolean  @default(true)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  deletedAt    DateTime?
+
+  @@index([deletedAt])
+  @@map("webhook_subscriptions")
+}
+
+// ---------------------------------------------------------------------------
+// PasswordResetTokens (Management API "Password" 設計に対応)
+// ---------------------------------------------------------------------------
+
+model PasswordResetToken {
+  id          String   @id @default(uuid())
+  tokenHash   String   @unique
+  userId      String
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// AdminUsers (Management API 人間の管理者ログイン用。Users(エンドユーザー)とは別概念)
+// ---------------------------------------------------------------------------
+
+model AdminUser {
+  id              String   @id @default(uuid())
+  email           String   @unique
+  passwordHash    String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  deletedAt       DateTime?
+
+  @@index([deletedAt])
+  @@map("admin_users")
+}
+
+// ---------------------------------------------------------------------------
+// AdminRevokedTokens
+// 管理者ログアウト時に失効させたJWTのjtiを永続化する。
+// メモリ上のSetでは再起動で失効情報が消え、また将来Podが複数化した際に
+// 機能しなくなるため、DBに永続化する設計とする。
+// ---------------------------------------------------------------------------
+
+model AdminRevokedToken {
+  id        String   @id @default(uuid())
+  jti       String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+  @@map("admin_revoked_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// OidcGenericStore
+// oidc-provider内部が要求するモデル(Interaction, Grant, DeviceCode,
+// BackchannelAuthenticationRequest, PushedAuthorizationRequest,
+// ReplayDetection, AccessToken, RegistrationAccessToken, InitialAccessToken)
+// の永続化用。これらは業務8テーブルの設計対象外(oidc-provider内部実装詳細)
+// のため、汎用KVストアとして単一テーブルにまとめる。
+// Client / AuthorizationCode / RefreshToken は上記の業務テーブルにマッピングする
+// (src/oidc-core/adapter.ts 参照)。
+// ---------------------------------------------------------------------------
+
+model OidcGenericStore {
+  id          String    @id @default(uuid())
+  modelName   String
+  key         String
+  payload     String    // JSON文字列
+  grantId     String?
+  userCode    String?
+  uid         String?
+  expiresAt   DateTime?
+  consumedAt  DateTime?
+
+  createdAt   DateTime  @default(now())
+
+  @@unique([modelName, key])
+  @@index([modelName, grantId])
+  @@index([modelName, userCode])
+  @@index([modelName, uid])
+  @@index([expiresAt])
+  @@map("oidc_generic_store")
+}
