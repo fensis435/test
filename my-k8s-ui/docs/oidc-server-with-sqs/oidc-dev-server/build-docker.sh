@@ -1,5 +1,11 @@
 set -xueo pipefail
 
+if [ ! -f .env ]; then
+  KEY1=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+  KEY2=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+  cat .env.example | sed 's/dev-cookie-secret-key-please-change/'${KEY1}'/g'| sed 's/dev-admin-jwt-secret-please-change/'${KEY2}'/g' > .env
+fi
+
 docker compose down -v || true
 docker compose build
 docker compose --profile jwks run --rm jwks
