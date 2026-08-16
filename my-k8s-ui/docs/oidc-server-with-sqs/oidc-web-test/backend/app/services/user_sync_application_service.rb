@@ -30,9 +30,20 @@ class UserSyncApplicationService
   def sync_user_change(event)
     event.validate!
 
+    # [修正] `ActiveRecord::Base.transaction do ... end` ブロック内で
+    # `return` を使うのは既知の落とし穴。Railsのバージョンによって、
+    # 非局所脱出(return/break/throw)がトランザクションの
+    # コミット/ロールバックに意図しない影響を与えることがある
+    # (Rails 6.1で挙動が変更され、6.1以降は既定でコミットされるように
+    # なったが、明示的に依存すべきではない)。
+    # 代わりに `next` でブロックを正常終了させ、結果はブロック外の
+    # ローカル変数に格納してから最後にまとめて返す、安全なパターンにする。
+    result = nil
+
     ActiveRecord::Base.transaction do
       unless record_event_once(event)
-        return :skipped_duplicate
+        result = :skipped_duplicate
+        next
       end
 
       existing = SyncedUser.find_by(external_user_id: event.user_id)
@@ -43,13 +54,15 @@ class UserSyncApplicationService
           "(#{event.event_name}) for #{event.user_id}: " \
           "event_time=#{event.event_time.iso8601} <= source_event_time=#{existing.source_event_time&.iso8601}"
         )
-        return :skipped_stale
+        result = :skipped_stale
+        next
       end
 
       apply_change(event, existing)
-
-      :applied
+      result = :applied
     end
+
+    result
   end
 
   private

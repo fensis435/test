@@ -140,6 +140,12 @@ ruby scripts/manage_users.rb create --email sync-test@example.com --password cor
 bin/rails runner "pp SyncedUser.all"
 ```
 
+## 実装後の自己レビューで発見・修正した問題
+
+Ruby側は実機実行できないため、追加のコードレビューを行い以下を発見・修正した。
+
+- **`UserSyncApplicationService#sync_user_change`**: `ActiveRecord::Base.transaction do ... end` ブロック内で `return` を使っていた。これはRails/Rubyでよく知られた落とし穴で、Railsのバージョンによってトランザクションのコミット/ロールバック挙動に意図しない影響を与えることがある。`next` + ブロック外のローカル変数に結果を格納するパターンに書き換えた(この`next`/`return`の挙動差自体はRubyの素の挙動として実際に動かして検証済み)。
+
 ## 未検証の項目(正直な申告)
 
 このサンドボックス環境は`rubygems.org`への接続が制限されているため、以下は**構文チェックのみ**で、実際の`bundle install`・DB接続・SQS送受信を伴う動作確認はできていません。
