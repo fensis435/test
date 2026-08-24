@@ -3,7 +3,6 @@
 require "aws-sdk-sqs"
 require "json"
 require "time"
-require 'pp'
 
 # ----------------------------------------------------------------------------
 # 駆動アダプター(Driving Adapter / Primary Adapter)。
@@ -80,9 +79,6 @@ class SqsUserEventAdapter
     response.messages.each { |message| process_message(message) }
 
     response.messages.size
-  rescue => e
-    Rails.logger.error "#{e.class}:#{e.message}"
-    raise e
   end
 
   private
