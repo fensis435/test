@@ -1,0 +1,733 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  EKS construction bastion EC2 (Amazon Linux 2023, SSM access only, no inbound).
+  NetworkMode=Internet: public subnet via IGW (or an existing subnet with outbound internet).
+  NetworkMode=Private: no internet at all; SSM/STS/S3/... are reached through VPC endpoints.
+  The instance itself has almost no permissions; broad permissions are
+  obtained only via sts:AssumeRole to the EKS builder role.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eks-bastion
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9-]{1,30}$'
+    Description: Name prefix used for tags.
+
+  NetworkMode:
+    Type: String
+    Default: Internet
+    AllowedValues: [Internet, Private]
+    Description: >-
+      Internet = outbound internet available (new VPC gets IGW + public subnet).
+      Private  = fully private (no IGW/NAT; VPC endpoints are created instead).
+
+  VpcId:
+    Type: String
+    Default: ''
+    Description: >-
+      Existing VPC ID. Leave empty to create a new VPC.
+      When set, SubnetId is required.
+
+  SubnetId:
+    Type: String
+    Default: ''
+    Description: >-
+      Existing subnet ID (required when VpcId is set).
+      Internet mode: needs outbound internet (IGW or NAT). Private mode: a private subnet.
+
+  NewVpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR of the new VPC (used only when VpcId is empty).
+
+  NewSubnetCidr:
+    Type: String
+    Default: 10.0.0.0/24
+    Description: CIDR of the new subnet (used only when VpcId is empty).
+
+  AssociatePublicIp:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Internet mode + existing subnet only: assign a public IP (false for private subnet + NAT).
+      Always true for a new VPC in Internet mode; always false in Private mode.
+
+  CreateVpcEndpoints:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Private mode only: create the VPC endpoints (ssm, ssmmessages, ec2messages, sts, s3).
+      Set false if the VPC already has them (duplicate private DNS names would fail).
+
+  EnableBuilderEndpoints:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Private mode only: also create the endpoints needed to build EKS privately
+      (ec2, eks, ecr.api, ecr.dkr, logs, elasticloadbalancing, autoscaling, kms,
+      secretsmanager, cloudformation, sqs, events).
+
+  ExistingVpcCidr:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+    Description: >-
+      Private mode + existing VPC: CIDR of that VPC (allowed to reach the endpoints on 443).
+      deploy.sh fills this in automatically when empty.
+
+  RouteTableIds:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: >-
+      Private mode + existing VPC: route tables that get the S3 gateway endpoint (comma separated).
+      deploy.sh fills this in automatically when empty.
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    Description: Must be x86_64 (the AMI lookup below is amd64).
+
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: >-
+      Latest Amazon Linux 2023 AMI (x86_64). NOTE: this resolves to the latest AMI on every update,
+      which replaces the instance when Amazon publishes a new image.
+      Pin an explicit ami-xxxx here to avoid that.
+
+  RootVolumeSizeGiB:
+    Type: Number
+    Default: 30
+    MinValue: 20
+
+  BuilderSessionSeconds:
+    Type: Number
+    Default: 14400
+    MinValue: 3600
+    MaxValue: 43200
+    Description: Max session duration of the EKS builder role.
+
+  SshPublicKey:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/=]+$'
+    Description: >-
+      Public key ("type base64", no comment) added to ec2-user's authorized_keys, for SSH over
+      SSM port forwarding. deploy.sh fills this in from -k or ~/.ssh/id_*.pub when empty.
+
+  HttpProxy:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional proxy URL for the EC2 side (dnf, curl, SSM agent). Empty = direct.
+      In Private mode this must be a proxy reachable from the VPC (VPN/DX), otherwise
+      the installation of kubectl / eksctl / helm is skipped.
+
+  NoProxy:
+    Type: String
+    Default: ''
+    Description: Extra no_proxy entries (comma separated). 169.254.169.254 and localhost are always added.
+
+  KubectlMinorVersion:
+    Type: String
+    Default: v1.33
+    AllowedPattern: '^v1\.[0-9]+$'
+    Description: kubectl minor version repo on pkgs.k8s.io (keep within +-1 of the target EKS version).
+
+Rules:
+  ExistingVpcNeedsSubnet:
+    RuleCondition: !Not [!Equals [!Ref VpcId, '']]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref SubnetId, '']]
+        AssertDescription: SubnetId is required when VpcId is set.
+  PrivateExistingVpcNeedsCidr:
+    RuleCondition: !And
+      - !Not [!Equals [!Ref VpcId, '']]
+      - !Equals [!Ref NetworkMode, Private]
+      - !Equals [!Ref CreateVpcEndpoints, 'true']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ExistingVpcCidr, '']]
+        AssertDescription: ExistingVpcCidr is required for Private mode on an existing VPC.
+
+Conditions:
+  CreateVpc: !Equals [!Ref VpcId, '']
+  IsInternet: !Equals [!Ref NetworkMode, Internet]
+  IsPrivate: !Equals [!Ref NetworkMode, Private]
+  CreateIgw: !And [!Condition CreateVpc, !Condition IsInternet]
+  AssignPublicIp: !And
+    - !Condition IsInternet
+    - !Or
+      - !Condition CreateVpc
+      - !Equals [!Ref AssociatePublicIp, 'true']
+  CreateEndpoints: !And
+    - !Condition IsPrivate
+    - !Equals [!Ref CreateVpcEndpoints, 'true']
+  CreateBuilderEndpoints: !And
+    - !Condition CreateEndpoints
+    - !Equals [!Ref EnableBuilderEndpoints, 'true']
+  InstallExtraTools: !Or
+    - !Condition IsInternet
+    - !Not [!Equals [!Ref HttpProxy, '']]
+
+Resources:
+  # ------------------------------------------------------------------
+  # Network (only when VpcId is empty)
+  # ------------------------------------------------------------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Condition: CreateVpc
+    Properties:
+      CidrBlock: !Ref NewVpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-vpc' }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: CreateIgw
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-igw' }
+
+  IgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateIgw
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  NewSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref NewSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: !If [IsInternet, true, false]
+      Tags:
+        - Key: Name
+          Value: !If [IsInternet, !Sub '${ProjectName}-public-a', !Sub '${ProjectName}-private-a']
+
+  NewRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !If [IsInternet, !Sub '${ProjectName}-public-rt', !Sub '${ProjectName}-private-rt']
+
+  # Only in Internet mode. Private mode has no default route at all.
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateIgw
+    DependsOn: IgwAttachment
+    Properties:
+      RouteTableId: !Ref NewRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  NewSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVpc
+    Properties:
+      SubnetId: !Ref NewSubnet
+      RouteTableId: !Ref NewRouteTable
+
+  # ------------------------------------------------------------------
+  # Security group: NO inbound. Access is via SSM Session Manager only
+  # (shell, or SSH / port forwarding tunnelled through SSM).
+  # ------------------------------------------------------------------
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Bastion - no inbound, SSM only
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-sg' }
+
+  # ------------------------------------------------------------------
+  # VPC endpoints (Private mode only)
+  # ------------------------------------------------------------------
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEndpoints
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W1030]  # ExistingVpcCidr is '' on the unused branch when a new VPC is created
+    Properties:
+      GroupDescription: VPC interface endpoints - HTTPS from the VPC
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !If [CreateVpc, !Ref NewVpcCidr, !Ref ExistingVpcCidr]
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-vpce-sg' }
+
+  # --- required for SSM sessions and the assume-role call ---
+  EpS3:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcEndpointType: Gateway
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      RouteTableIds: !If [CreateVpc, [!Ref NewRouteTable], !Ref RouteTableIds]
+
+  EpSsm:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpSsmMessages:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpEc2Messages:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpSts:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sts'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # --- needed to build / operate a private EKS from the bastion ---
+  EpEc2:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBuilderEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpEks:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBuilderEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.eks'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpEcrApi:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBuilderEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.api'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpEcrDkr:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBuilderEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.dkr'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpLogs:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBuilderEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpElb:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBuilderEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.elasticloadbalancing'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpAutoscaling:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBuilderEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.autoscaling'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpKms:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBuilderEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.kms'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpSecretsManager:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBuilderEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpCloudFormation:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBuilderEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.cloudformation'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpSqs:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBuilderEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sqs'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EpEvents:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateBuilderEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.events'
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+      SubnetIds: [!If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # ------------------------------------------------------------------
+  # IAM
+  # ------------------------------------------------------------------
+  # Instance role: SSM core only (+ AssumeRole policy attached below).
+  BastionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub 'ec2.${AWS::URLSuffix}'
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-instance-role' }
+
+  BastionInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref BastionRole
+
+  # Role with broad permissions for building EKS & related resources.
+  # Only the bastion instance role may assume it.
+  EksBuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      MaxSessionDuration: !Ref BuilderSessionSeconds
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt BastionRole.Arn
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: eks-builder-full-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: BuilderServices
+                Effect: Allow
+                Action:
+                  - ec2:*                    # EC2, VPC, SG, IGW, NAT GW, VPC Endpoint, EBS ...
+                  - eks:*
+                  - s3:*
+                  - cognito-idp:*
+                  - cognito-identity:*
+                  - sqs:*
+                  - sns:*
+                  - cloudtrail:*
+                  - events:*
+                  - scheduler:*
+                  - ssm:*
+                  - elasticloadbalancing:*
+                  - route53:*
+                  - route53resolver:*
+                  - codeartifact:*
+                  - ecr:*
+                  - ecr-public:*
+                  - codebuild:*
+                  - codecommit:*
+                  - codestar-connections:*
+                  - cloudformation:*
+                  - autoscaling:*
+                  - logs:*
+                  - cloudwatch:*
+                  - kms:*
+                  - acm:*
+                  - secretsmanager:*
+                  - wafv2:*
+                  - sts:*
+                  - tag:*
+                  - pricing:*
+                  - iam:*                    # required for EKS/IRSA/Pod Identity role creation
+                Resource: '*'
+
+  # Attached separately to avoid a circular dependency (Role <-> Builder role).
+  BastionAssumePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Allow the bastion instance role to assume the EKS builder role only
+      Roles:
+        - !Ref BastionRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !GetAtt EksBuilderRole.Arn
+
+  # ------------------------------------------------------------------
+  # EC2
+  # ------------------------------------------------------------------
+  BastionInstance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      # Refs in Metadata create implicit dependencies: in Private mode the SSM / STS / S3
+      # endpoints must exist before the instance boots (DependsOn cannot target conditional resources).
+      EndpointDependencies: !If
+        - CreateEndpoints
+        - [!Ref EpS3, !Ref EpSsm, !Ref EpSsmMessages, !Ref EpEc2Messages, !Ref EpSts]
+        - none
+      cfn-lint:
+        config:
+          ignore_checks: [W1030]  # SubnetId is '' on the unused branch when a new VPC is created
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref BastionInstanceProfile
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: !If [AssignPublicIp, true, false]
+          SubnetId: !If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]
+          GroupSet:
+            - !Ref BastionSecurityGroup
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref RootVolumeSizeGiB
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-bastion' }
+        - { Key: Project, Value: !Ref ProjectName }
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            exec > >(tee -a /var/log/bastion-bootstrap.log) 2>&1
+            set -x
+
+            PRIVATE_MODE='${IsPrivateStr}'
+            INSTALL_EXTRA='${InstallExtraStr}'
+            PROXY='${HttpProxy}'
+            NOPROXY='169.254.169.254,localhost,127.0.0.1,${NoProxy}'
+            # Persisted for login shells. In Private mode AWS API calls must bypass the
+            # proxy so that they hit the VPC endpoints (S3 gateway / interface endpoints).
+            PERSIST_NOPROXY="$NOPROXY"
+            if [ "$PRIVATE_MODE" = "true" ]; then PERSIST_NOPROXY="$NOPROXY,.amazonaws.com"; fi
+
+            if [ -n "$PROXY" ]; then
+              cat >> /etc/environment <<EOT
+            http_proxy=$PROXY
+            https_proxy=$PROXY
+            HTTP_PROXY=$PROXY
+            HTTPS_PROXY=$PROXY
+            no_proxy=$PERSIST_NOPROXY
+            NO_PROXY=$PERSIST_NOPROXY
+            EOT
+              export http_proxy=$PROXY https_proxy=$PROXY HTTP_PROXY=$PROXY HTTPS_PROXY=$PROXY
+              export no_proxy=$NOPROXY NO_PROXY=$NOPROXY
+              # SSM agent: only needs the proxy when it reaches SSM over the internet.
+              if [ "$PRIVATE_MODE" != "true" ]; then
+                D=/etc/systemd/system/amazon-ssm-agent.service.d
+                mkdir -p $D
+                printf '[Service]\nEnvironment="HTTP_PROXY=%s"\nEnvironment="HTTPS_PROXY=%s"\nEnvironment="NO_PROXY=%s"\n' "$PROXY" "$PROXY" "$NOPROXY" > $D/override.conf
+                systemctl daemon-reload
+                systemctl restart amazon-ssm-agent
+              fi
+            fi
+
+            # SSH is reachable only through SSM (AWS-StartSSHSession / port forwarding):
+            # the security group has no inbound rule.
+            SSH_KEY='${SshPublicKey}'
+            if [ -n "$SSH_KEY" ]; then
+              install -d -m 700 -o ec2-user -g ec2-user /home/ec2-user/.ssh
+              printf '%s\n' "$SSH_KEY" >> /home/ec2-user/.ssh/authorized_keys
+              chown ec2-user:ec2-user /home/ec2-user/.ssh/authorized_keys
+              chmod 600 /home/ec2-user/.ssh/authorized_keys
+            fi
+            systemctl enable --now sshd || true
+
+            # dnf: in Private mode the Amazon Linux repositories (hosted on S3) must bypass
+            # the proxy so that they are fetched through the S3 gateway endpoint.
+            dnf_run() { no_proxy="$PERSIST_NOPROXY" NO_PROXY="$PERSIST_NOPROXY" dnf "$@"; }
+
+            # Base packages come from the Amazon Linux repositories (AWS CLI v2 and the
+            # SSM agent are already part of the AMI).
+            dnf_run install -y jq git unzip tar openssl bash-completion
+
+            if [ "$INSTALL_EXTRA" = "true" ]; then
+              # These come from the internet (pkgs.k8s.io / GitHub / awscli.amazonaws.com).
+              if ! command -v aws >/dev/null 2>&1; then
+                curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip \
+                  && unzip -q -o /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --update
+              fi
+
+              # kubectl
+              cat > /etc/yum.repos.d/kubernetes.repo <<EOT
+            [kubernetes]
+            name=Kubernetes
+            baseurl=https://pkgs.k8s.io/core:/stable:/${KubectlMinorVersion}/rpm/
+            enabled=1
+            gpgcheck=1
+            gpgkey=https://pkgs.k8s.io/core:/stable:/${KubectlMinorVersion}/rpm/repodata/repomd.xml.key
+            EOT
+              dnf_run install -y kubectl
+
+              # eksctl / helm
+              curl -fsSL https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz \
+                | tar xz -C /usr/local/bin eksctl
+              curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+            else
+              echo "Private mode without HttpProxy: kubectl / eksctl / helm are NOT installed."
+              echo "Copy them over SSH (scp) - see README."
+            fi
+
+            # AWS profile for assume-role (no secrets stored; credentials come from IMDS -> STS)
+            mkdir -p /etc/aws-bastion
+            cat > /etc/aws-bastion/config <<EOT
+            [default]
+            region = ${AWS::Region}
+
+            [profile eks-builder]
+            role_arn = ${EksBuilderRole.Arn}
+            credential_source = Ec2InstanceMetadata
+            role_session_name = bastion
+            duration_seconds = ${BuilderSessionSeconds}
+            region = ${AWS::Region}
+            EOT
+            chmod 644 /etc/aws-bastion/config
+
+            cat > /etc/profile.d/aws-bastion.sh <<EOT
+            export AWS_CONFIG_FILE=/etc/aws-bastion/config
+            export AWS_DEFAULT_REGION=${AWS::Region}
+            EOT
+            echo 'export AWS_CONFIG_FILE=/etc/aws-bastion/config' >> /etc/bash.bashrc
+            echo 'export AWS_DEFAULT_REGION=${AWS::Region}' >> /etc/bash.bashrc
+
+            # Convenience: shell with the EKS builder role active
+            cat > /usr/local/bin/eks-builder-shell <<'EOT'
+            #!/bin/bash
+            export AWS_CONFIG_FILE=/etc/aws-bastion/config
+            export AWS_PROFILE=eks-builder
+            exec bash -l
+            EOT
+            chmod 755 /usr/local/bin/eks-builder-shell
+
+            echo "bootstrap finished"
+          - IsPrivateStr: !If [IsPrivate, 'true', 'false']
+            InstallExtraStr: !If [InstallExtraTools, 'true', 'false']
+
+Outputs:
+  NetworkMode:
+    Value: !Ref NetworkMode
+  InstanceId:
+    Value: !Ref BastionInstance
+  VpcId:
+    Value: !If [CreateVpc, !Ref Vpc, !Ref VpcId]
+  SubnetId:
+    Value: !If [CreateVpc, !Ref NewSubnet, !Ref SubnetId]
+  SecurityGroupId:
+    Value: !Ref BastionSecurityGroup
+  BastionRoleArn:
+    Value: !GetAtt BastionRole.Arn
+  EksBuilderRoleArn:
+    Value: !GetAtt EksBuilderRole.Arn
+  SsmStartSessionCommand:
+    Value: !Sub 'aws ssm start-session --target ${BastionInstance} --region ${AWS::Region}'
+  SsmSshPortForwardCommand:
+    Value: !Sub 'aws ssm start-session --target ${BastionInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters ''{"portNumber":["22"],"localPortNumber":["2222"]}'''

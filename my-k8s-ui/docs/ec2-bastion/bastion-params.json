@@ -1,0 +1,20 @@
+[
+  { "ParameterKey": "ProjectName",            "ParameterValue": "eks-bastion" },
+  { "ParameterKey": "NetworkMode",            "ParameterValue": "Internet" },
+  { "ParameterKey": "VpcId",                  "ParameterValue": "" },
+  { "ParameterKey": "SubnetId",               "ParameterValue": "" },
+  { "ParameterKey": "NewVpcCidr",             "ParameterValue": "10.0.0.0/16" },
+  { "ParameterKey": "NewSubnetCidr",          "ParameterValue": "10.0.0.0/24" },
+  { "ParameterKey": "AssociatePublicIp",      "ParameterValue": "false" },
+  { "ParameterKey": "CreateVpcEndpoints",     "ParameterValue": "true" },
+  { "ParameterKey": "EnableBuilderEndpoints", "ParameterValue": "true" },
+  { "ParameterKey": "ExistingVpcCidr",        "ParameterValue": "" },
+  { "ParameterKey": "RouteTableIds",          "ParameterValue": "" },
+  { "ParameterKey": "InstanceType",           "ParameterValue": "t3.small" },
+  { "ParameterKey": "RootVolumeSizeGiB",      "ParameterValue": "30" },
+  { "ParameterKey": "BuilderSessionSeconds",  "ParameterValue": "14400" },
+  { "ParameterKey": "SshPublicKey",           "ParameterValue": "" },
+  { "ParameterKey": "HttpProxy",              "ParameterValue": "" },
+  { "ParameterKey": "NoProxy",                "ParameterValue": "" },
+  { "ParameterKey": "KubectlMinorVersion",    "ParameterValue": "v1.33" }
+]
